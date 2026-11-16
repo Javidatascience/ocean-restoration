@@ -69,6 +69,44 @@ describe('progression', () => {
   });
 });
 
+describe('goals and bulk buying', () => {
+  it('goals are claimed in order and pay their reward once', () => {
+    const s = newState(0);
+    expect(sim.claimGoal(s)).toBe(0);
+    sim.collect(s, 10);
+    expect(sim.goalStatus(s)!.done).toBe(true);
+    expect(sim.claimGoal(s)).toBe(15);
+    expect(s.coins).toBe(15);
+    expect(sim.claimGoal(s)).toBe(0);
+    expect(s.goal).toBe(1);
+  });
+
+  it('buying x10 costs the sum of ten rising prices', () => {
+    const s = newState(0);
+    let sum = 0;
+    const probe = newState(0);
+    for (let i = 0; i < 10; i++) { sum += sim.unitCost(probe, 'worker'); probe.units.worker++; }
+    expect(sim.unitBulk(s, 'worker', 10)).toEqual({ n: 10, cost: sum });
+    s.coins = sum - 1;
+    expect(sim.buyUnit(s, 'worker', 10)).toBe(false);
+    s.coins = sum;
+    expect(sim.buyUnit(s, 'worker', 10)).toBe(true);
+    expect(s.units.worker).toBe(10);
+    expect(s.coins).toBe(0);
+  });
+
+  it('max buys as many as affordable and never overspends', () => {
+    const s = newState(0);
+    s.coins = 100;
+    const b = sim.unitBulk(s, 'worker', 'max');
+    expect(b.n).toBe(3);
+    expect(b.cost).toBeLessThanOrEqual(100);
+    s.coins = 1;
+    expect(sim.unitBulk(s, 'worker', 'max').n).toBe(1);
+    expect(sim.buyUnit(s, 'worker', 'max')).toBe(false);
+  });
+});
+
 describe('offline progress', () => {
   it('uses real elapsed time, at reduced efficiency, up to the cap', () => {
     const s = newState(0);

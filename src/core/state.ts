@@ -19,6 +19,8 @@ export interface GameState {
   milestones: number[];
   beachRewarded: boolean;
   reefCharted: boolean;
+  /** Index of the current goal in GOALS. */
+  goal: number;
   sound: boolean;
   lastSeen: number;
 }
@@ -31,7 +33,7 @@ export function newState(now = Date.now()): GameState {
   return {
     v: 1, coins: 0, waste: 0, rep: 0, restorePts: 0, repAwardedPct: 0, totalWaste: 0, totalCoins: 0,
     upgrades, units, recycler: 0, research: [], animals: [], milestones: [],
-    beachRewarded: false, reefCharted: false, sound: true, lastSeen: now,
+    beachRewarded: false, reefCharted: false, goal: 0, sound: true, lastSeen: now,
   };
 }
 

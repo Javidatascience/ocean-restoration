@@ -12,7 +12,8 @@ export type Tab = 'beach' | 'equipment' | 'automation' | 'research' | 'map' | 'l
 
 export interface UIActions {
   buyUpgrade(id: UpgradeId): boolean;
-  buyUnit(id: UnitId): boolean;
+  buyUnit(id: UnitId, qty: number | 'max'): boolean;
+  claimGoal(): number;
   buyRecycler(): boolean;
   buyResearch(id: string): boolean;
   chartReef(): boolean;
@@ -32,6 +33,7 @@ export class UI {
   private selResearch: string | null = null;
   private signature = '';
   private lastHud = '';
+  private qty: number | 'max' = 1;
 
   constructor(private s: GameState, private act: UIActions) {
     $('nav').addEventListener('click', (e) => {
@@ -47,6 +49,9 @@ export class UI {
       act.tabSound();
     });
     $('sheet-body').addEventListener('click', (e) => this.onSheetClick(e));
+    $('hint').addEventListener('click', () => {
+      if (act.claimGoal() > 0) this.refresh();
+    });
   }
 
   setState(s: GameState): void {
@@ -78,7 +83,8 @@ export class UI {
     const [kind, id] = (el.dataset.act ?? '').split(':');
     let ok: boolean | null = null;
     if (kind === 'upgrade') ok = this.act.buyUpgrade(id as UpgradeId);
-    else if (kind === 'unit') ok = this.act.buyUnit(id as UnitId);
+    else if (kind === 'unit') ok = this.act.buyUnit(id as UnitId, this.qty);
+    else if (kind === 'qty') { this.qty = id === 'max' ? 'max' : Number(id); this.act.tabSound(); }
     else if (kind === 'recycler') ok = this.act.buyRecycler();
     else if (kind === 'research') ok = this.act.buyResearch(id);
     else if (kind === 'reef') ok = this.act.chartReef();
@@ -148,6 +154,7 @@ export class UI {
       UNITS.map((u) => (p >= u.unlockAt ? 1 : 0)).join(''),
       RESEARCH.map((r) => sim.researchState(s, r)[0]).join(''),
       s.animals.length, s.milestones.length, sim.canChartReef(s) ? 1 : 0, Math.floor(p),
+      this.tab === 'automation' && this.qty === 'max' ? UNITS.map((u) => sim.unitBulk(s, u.id, 'max').n).join(',') : '',
     ].join('|');
   }
 
@@ -155,16 +162,21 @@ export class UI {
     const s = this.s;
     let text: string;
     const stuck = sim.isBottlenecked(s) && (s.recycler < RECYCLERS.length - 1 || s.upgrades.conveyor < 40);
+    const goal = sim.goalStatus(s);
+    const claim = !!goal && goal.done;
     if (s.totalWaste < 4) text = '👆 Tap the trash to clean the beach';
-    else if (s.totalCoins < 10 && s.coins < 10) text = '♻️ Waste is recycled into coins';
-    else if (s.totalWaste < 60 && s.coins >= 10 && s.upgrades.grabber === 0 && sim.totalUnits(s) === 0) text = '🧰 You can afford your first upgrade';
+    else if (goal && claim) text = `🎁 Goal complete — tap to claim ${fmt(goal.def.reward)}`;
     else if (stuck) text = '📦 Storage is full — upgrade your recycling';
-    else {
+    else if (goal) {
+      const count = goal.def.type === 'pct' ? `${goal.cur.toFixed(1)}%` : goal.def.n > 1 ? `${fmt(Math.floor(goal.cur))}/${fmt(goal.def.n)}` : '';
+      text = `🎯 ${goal.def.text}${count ? ' · ' + count : ''}`;
+    } else {
       const next = ANIMALS.find((a) => !s.animals.includes(a.id));
       text = next ? `Next: ${next.name} returns at ${next.at}%` : s.reefCharted ? '🌊 Your ocean is thriving' : '🗺️ The Coral Reef awaits on the Ocean Map';
     }
     const el = $('hint');
     if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('claim', claim && s.totalWaste >= 4);
   }
 
   private badges(): void {
@@ -253,7 +265,8 @@ export class UI {
       if (!sim.isUnlocked(s, d.unlockAt)) return this.locked(d.name, d.unlockAt);
       const n = s.units[id];
       const rate = sim.unitRate(s, id) * 60;
-      return `<div class="card"><canvas class="ico ${d.group}" data-icon="unit:${id}"></canvas><div class="info"><div class="name">${d.name}<span class="lvl">×${n}</span></div><div class="desc">${d.desc}</div><div class="eff">+${fmt(rate)} waste/min each${n ? ` <span class="to">· ${fmt(rate * n)}/min total</span>` : ''}</div></div>${this.buyBtn('unit:' + id, sim.unitCost(s, id))}</div>`;
+      const bulk = sim.unitBulk(s, id, this.qty);
+      return `<div class="card"><canvas class="ico ${d.group}" data-icon="unit:${id}"></canvas><div class="info"><div class="name">${d.name}<span class="lvl">×${n}</span></div><div class="desc">${d.desc}</div><div class="eff">+${fmt(rate)} waste/min each${n ? ` <span class="to">· ${fmt(rate * n)}/min total</span>` : ''}</div></div>${this.buyBtn('unit:' + id, bulk.cost, 'coins', bulk.n > 1 ? 'Buy ×' + bulk.n : '')}</div>`;
     };
     const firstLocked = (group: string): UnitId[] => {
       const out: UnitId[] = [];
@@ -266,6 +279,7 @@ export class UI {
     };
     const total = sim.wastePerMinute(s);
     return `<div class="summary"><b>+${fmt(total)}</b> waste/min from ${sim.totalUnits(s)} helpers · offline they keep working at ${Math.round(sim.offlineEfficiency(s) * 100)}% for up to ${sim.offlineCapSeconds(s) / 3600}h</div>
+      <div class="seg">${([1, 10, 'max'] as const).map((q) => `<button type="button" class="${this.qty === q ? 'on' : ''}" data-act="qty:${q}">${q === 'max' ? 'Max' : '×' + q}</button>`).join('')}</div>
       <h3>Beach crew</h3>${firstLocked('beach').map(card).join('')}
       <h3>Ocean fleet</h3>${firstLocked('ocean').map(card).join('')}`;
   }

@@ -364,6 +364,27 @@ export function trash(c: C, kind: number): void {
   }
 }
 
+/** The bonus pickup: a corked bottle with a note inside, glowing softly. */
+export function bottleNote(c: C, t: number): void {
+  const pulse = 0.5 + 0.5 * Math.sin(t * 3);
+  ell(c, 0, -6, 15 + pulse * 3, 15 + pulse * 3, `rgba(255,226,130,${0.16 + pulse * 0.12})`);
+  ell(c, 0, -6, 9.5, 9.5, 'rgba(255,240,180,0.35)');
+  c.save();
+  c.rotate(-0.55);
+  rr(c, -3.6, -11, 7.2, 12, 2.6, '#8fe0c0');
+  rr(c, -1.7, -14.6, 3.4, 4.4, 1, '#8fe0c0');
+  rr(c, -1.9, -16.6, 3.8, 2.6, 0.8, '#b98d5c');
+  rr(c, -2.2, -8.6, 4.4, 7, 1, '#fff6dc');
+  line(c, [-1.2, -6.6, 1.2, -6.6], '#d9b07f', 0.6);
+  line(c, [-1.2, -4.8, 1.2, -4.8], '#d9b07f', 0.6);
+  rr(c, -3, -10, 1.3, 9, 0.6, 'rgba(255,255,255,0.6)');
+  c.restore();
+  for (let i = 0; i < 3; i++) {
+    const a = t * 1.3 + (i * TAU) / 3;
+    ell(c, Math.cos(a) * 13, -6 + Math.sin(a) * 9, 1.2, 1.2, `rgba(255,255,255,${0.5 + 0.4 * Math.sin(t * 5 + i)})`);
+  }
+}
+
 // ---- plants --------------------------------------------------------------
 
 export function palm(c: C, t: number, health: number): void {

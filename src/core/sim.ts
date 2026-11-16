@@ -1,7 +1,7 @@
 // Pure game rules: no DOM, no timers. Used by the game loop, offline progress, tests and the balance tool.
 import {
-  ANIMALS, MILESTONES, RECYCLERS, REEF_ROUTE_COST, RESEARCH, UNITS, UNIT_GROWTH, UPGRADES,
-  type ResearchDef, type UnitId, type UpgradeId,
+  ANIMALS, GOALS, MILESTONES, RECYCLERS, REEF_ROUTE_COST, RESEARCH, UNITS, UNIT_GROWTH, UPGRADES,
+  type GoalDef, type ResearchDef, type UnitId, type UpgradeId,
 } from './content.ts';
 import type { GameState } from './state.ts';
 
@@ -151,10 +151,28 @@ export function canBuyUnit(s: GameState, id: UnitId): boolean {
   const d = UNITS.find((u) => u.id === id)!;
   return isUnlocked(s, d.unlockAt) && s.coins >= unitCost(s, id);
 }
-export function buyUnit(s: GameState, id: UnitId): boolean {
-  if (!canBuyUnit(s, id)) return false;
-  s.coins -= unitCost(s, id);
-  s.units[id]++;
+/** How many units a "buy xN" press gets and what it costs. 'max' = as many as the coins allow (at least 1). */
+export function unitBulk(s: GameState, id: UnitId, qty: number | 'max'): { n: number; cost: number } {
+  const d = UNITS.find((u) => u.id === id)!;
+  const want = qty === 'max' ? 1000 : qty;
+  let n = 0;
+  let cost = 0;
+  let next = d.baseCost * Math.pow(UNIT_GROWTH, s.units[id]);
+  while (n < want) {
+    const c = Math.ceil(next);
+    if (qty === 'max' && n > 0 && cost + c > s.coins) break;
+    cost += c;
+    n++;
+    next *= UNIT_GROWTH;
+  }
+  return { n, cost };
+}
+export function buyUnit(s: GameState, id: UnitId, qty: number | 'max' = 1): boolean {
+  const d = UNITS.find((u) => u.id === id)!;
+  const b = unitBulk(s, id, qty);
+  if (!isUnlocked(s, d.unlockAt) || s.coins < b.cost) return false;
+  s.coins -= b.cost;
+  s.units[id] += b.n;
   return true;
 }
 
@@ -191,6 +209,45 @@ export function chartReef(s: GameState): boolean {
   s.rep -= REEF_ROUTE_COST;
   s.reefCharted = true;
   return true;
+}
+
+// ---- goals & bonuses -----------------------------------------------------
+
+export interface GoalStatus { def: GoalDef; cur: number; done: boolean }
+
+export function goalStatus(s: GameState): GoalStatus | null {
+  const def = GOALS[s.goal];
+  if (!def) return null;
+  let cur = 0;
+  if (def.type === 'waste') cur = s.totalWaste;
+  else if (def.type === 'upgrade') cur = s.upgrades[def.id as UpgradeId];
+  else if (def.type === 'unit') cur = s.units[def.id as UnitId];
+  else if (def.type === 'research') cur = s.research.length;
+  else if (def.type === 'recycler') cur = s.recycler;
+  else if (def.type === 'pct') cur = pct(s);
+  else if (def.type === 'animals') cur = s.animals.length;
+  else cur = s.reefCharted ? 1 : 0;
+  return { def, cur: Math.min(cur, def.n), done: cur >= def.n };
+}
+/** Claims the current goal if it is complete. Returns the coins granted (0 if nothing to claim). */
+export function claimGoal(s: GameState): number {
+  const g = goalStatus(s);
+  if (!g || !g.done) return 0;
+  s.coins += g.def.reward;
+  s.totalCoins += g.def.reward;
+  s.goal++;
+  return g.def.reward;
+}
+
+/** Coins inside a message in a bottle: 45 seconds of current income, never less than 25. */
+export function bottleReward(s: GameState): number {
+  return Math.max(25, Math.round(coinsPerMinute(s) * 0.75));
+}
+export function grantBottle(s: GameState): number {
+  const amount = bottleReward(s);
+  s.coins += amount;
+  s.totalCoins += amount;
+  return amount;
 }
 
 // ---- progression ---------------------------------------------------------

@@ -35,7 +35,19 @@ function bought(ok: boolean, where: 'station' | 'store' | 'player'): boolean {
 
 const ui = new UI(state, {
   buyUpgrade: (id) => bought(sim.buyUpgrade(state, id), id === 'conveyor' ? 'station' : id === 'bag' ? 'store' : 'player'),
-  buyUnit: (id) => bought(sim.buyUnit(state, id), 'station'),
+  buyUnit: (id, qty) => bought(sim.buyUnit(state, id, qty), 'station'),
+  claimGoal: () => {
+    const reward = sim.claimGoal(state);
+    if (reward > 0) {
+      sfx.unlock();
+      const p = scene.stationPos();
+      scene.popup(p.x, p.y - 60, '+' + fmt(reward), '#ffd24a', 20);
+      scene.purchaseFx('station');
+      document.getElementById('pill-coins')?.animate([{ transform: 'scale(1.12)' }, { transform: 'scale(1)' }], { duration: 260 });
+      save(state);
+    }
+    return reward;
+  },
   buyRecycler: () => {
     const ok = bought(sim.buyRecycler(state), 'station');
     if (ok) sfx.unlock();
@@ -75,6 +87,16 @@ scene.onCollect = (items) => {
     scene.popup(it.x, it.y - 16, '+' + fmt(amount), KIND_VALUE[it.kind] > 1.6 ? '#ffe08a' : '#ffffff', KIND_VALUE[it.kind] > 1.6 ? 17 : 14);
   }
   sfx.pop();
+  navigator.vibrate?.(8);
+};
+scene.onBottle = (x, y) => {
+  unlockAudio();
+  const amount = sim.grantBottle(state);
+  scene.popup(x, y - 24, '+' + fmt(amount), '#ffd24a', 20);
+  sfx.unlock();
+  navigator.vibrate?.([10, 40, 10]);
+  ui.toast('Message in a bottle', `A thank-you note, with ${fmt(amount)} coins tucked inside.`, '🍾');
+  save(state);
 };
 window.addEventListener('pointerdown', unlockAudio, { once: true });
 

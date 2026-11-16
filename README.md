@@ -11,8 +11,10 @@ and twelve animals return one by one as the beach recovers.
 - **Tap** trash to collect it. Waste goes to storage, the recycler turns it into coins.
 - **Equipment**: hand tools (grabber, bag, net, cart) and five tiers of recycling infrastructure.
 - **Automation**: workers, electric beach cleaners, boats, floating collectors, vessels, drones and ocean robots.
-  Every unit you buy is visible working in the scene.
+  Every unit you buy is visible working in the scene. Buy ×1, ×10 or Max.
 - **Research**: spend Ocean Reputation in three branches (Cleanup, Automation, Ecology).
+- **Goals**: a chain of small objectives at the bottom of the screen; tap to claim the coin reward.
+- **Message in a bottle**: now and then a glowing bottle drifts in. Tap it for a coin bonus.
 - **Ocean Map**: the Tropical Beach is fully playable; the other five regions are locked destinations.
 - **Offline**: helpers keep working while you are away (50% for up to 8 h; research raises it to 100% / 16 h).
 

@@ -20,6 +20,8 @@ interface Decor { x: number; y: number; at: number; kind: number; ph: number; s:
 
 export interface CollectedItem { kind: number; x: number; y: number }
 
+/** Seconds a message in a bottle stays before drifting away. */
+const BOTTLE_LIFE = 45;
 const VISIBLE_CAP: Record<UnitId, number> = { worker: 6, cleaner: 3, boat: 4, floater: 4, vessel: 2, drone: 4, robot: 3 };
 const SPEED: Record<UnitId, number> = { worker: 26, cleaner: 36, boat: 30, floater: 0, vessel: 13, drone: 62, robot: 11 };
 const WORKER_SHIRTS = ['#ff9f43', '#ff7aa2', '#7c9cf5', '#4cc27a', '#b58cf0', '#f2c14e'];
@@ -41,6 +43,7 @@ const lerp = (a: number, b: number, t: number): number => a + (b - a) * Math.max
 
 export class Scene {
   onCollect: (items: CollectedItem[], x: number, y: number) => void = () => {};
+  onBottle: (x: number, y: number) => void = () => {};
 
   private c: C;
   private W = 390;
@@ -63,6 +66,8 @@ export class Scene {
   private mantaM: Mover | null = null;
   private dolphinJump = { x: 0, y: 0, t: 9, next: 3, dir: 1 };
   private player: Mover = { x: 0, y: 0, tx: 0, ty: 0, wait: 0, dir: 1, ph: 0, moving: false, trail: 0 };
+  private bottle: { x: number; y: number; age: number; ph: number } | null = null;
+  private bottleTimer = 45;
   private coinAcc = 0;
   private coinTimer = 0;
 
@@ -148,6 +153,7 @@ export class Scene {
     this.cv.height = Math.round(h * dpr);
     this.c.setTransform(dpr, 0, 0, dpr, 0, 0);
     for (const tr of this.trash) { tr.x *= sx; tr.y *= sy; }
+    this.bottle = null;
     this.buildDecor();
     const reseat = (m: Mover, water: boolean) => {
       const p = water ? this.randWater() : this.randSand();
@@ -239,6 +245,14 @@ export class Scene {
     const sy = this.shoreY(x) + 12 * k;
     this.player.tx = Math.max(10 * k, Math.min(this.W - 10 * k, x));
     this.player.ty = Math.min(this.H - 8 * k, Math.max(y + 4 * k, sy));
+    const bt = this.bottle;
+    if (bt && Math.hypot(bt.x - x, bt.y - 8 * k - y) < 34 * k) {
+      this.bottle = null;
+      this.bottleTimer = 100 + Math.random() * 60;
+      this.burst(bt.x, bt.y - 8 * k, '255,226,130', 18, 110);
+      this.onBottle(bt.x, bt.y);
+      return;
+    }
     if (!hit.length) {
       this.parts.push({ x, y, vx: 0, vy: 0, t: 0, life: 0.45, color: this.isWater(x, y) ? '255,255,255' : '190,160,110', r: 6 * k, g: 0, ring: true });
       return;
@@ -330,6 +344,21 @@ export class Scene {
       if (this.trash.length < this.maxTrash()) this.spawnTrash(false);
     }
     for (const tr of this.trash) tr.age = Math.min(1, tr.age + dt * 2.5);
+
+    // message in a bottle: drifts in now and then and waits a good while to be picked up
+    if (this.bottle) {
+      this.bottle.age += dt;
+      if (this.bottle.age > BOTTLE_LIFE) {
+        this.bottle = null;
+        this.bottleTimer = 100 + Math.random() * 60;
+      }
+    } else if (state.totalWaste > 30) {
+      this.bottleTimer -= dt;
+      if (this.bottleTimer <= 0) {
+        const p = this.randWater(Math.random, 34, 170);
+        this.bottle = { x: p.x, y: Math.max(40 * k, p.y), age: 0, ph: Math.random() * TAU };
+      }
+    }
 
     // player
     {
@@ -628,6 +657,23 @@ export class Scene {
         c.rotate(tr.rot + (tr.water ? Math.sin(t * 1.5 + tr.ph) * 0.12 : 0));
         c.globalAlpha = smooth(tr.age);
         S.trash(c, tr.kind);
+        c.restore();
+      });
+    }
+    if (this.bottle) {
+      const b = this.bottle;
+      const fade = Math.min(1, b.age / 0.8, (BOTTLE_LIFE - b.age) / 3);
+      add(b.y, () => {
+        c.save();
+        c.globalAlpha = Math.max(0, fade);
+        c.beginPath();
+        c.ellipse(b.x, b.y + 1 * k, (12 + Math.sin(t * 2 + b.ph) * 2) * k, 4.2 * k, 0, 0, TAU);
+        c.strokeStyle = 'rgba(255,255,255,0.7)';
+        c.lineWidth = 1.2 * k;
+        c.stroke();
+        c.translate(b.x, b.y + Math.sin(t * 2 + b.ph) * 2 * k);
+        c.scale(k * 1.35, k * 1.35);
+        S.bottleNote(c, t);
         c.restore();
       });
     }

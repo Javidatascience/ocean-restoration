@@ -104,8 +104,18 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
-  transition: opacity 0.25s;
+  transition: opacity 0.25s, background 0.2s;
 }
+#hint.claim {
+  pointer-events: auto;
+  cursor: pointer;
+  background: linear-gradient(180deg, #ffe08a, #f6b93b);
+  color: #5a3d00;
+  box-shadow: 0 3px 0 #d99a1c, var(--shadow);
+  animation: nudge 1.4s ease-in-out infinite;
+}
+@keyframes nudge { 50% { transform: translateX(-50%) translateY(-3px); } }
+.sheet-open #hint.claim { pointer-events: none; }
 .sheet-open #hint { opacity: 0; }
 #life-chip {
   position: absolute;
@@ -176,6 +186,9 @@ canvas.ico.beach, .card.feature canvas.ico { background: linear-gradient(160deg,
 #sheet-body h3 small { display: block; margin-top: 2px; text-transform: none; letter-spacing: 0; font-size: 11.5px; font-weight: 700; color: var(--teal-d); }
 .summary { margin: 2px 2px 8px; padding: 8px 12px; border-radius: 14px; background: #eef8f1; font-size: 12px; font-weight: 700; color: #3f6f62; line-height: 1.35; }
 .summary b { color: var(--teal-d); font-size: 14px; }
+.seg { display: flex; gap: 4px; padding: 4px; margin: 0 2px 4px; border-radius: 14px; background: #f1e8d6; }
+.seg button { flex: 1; min-height: 38px; border-radius: 11px; font-weight: 800; font-size: 13px; color: var(--muted); }
+.seg button.on { background: var(--card); color: var(--teal-d); box-shadow: 0 2px 6px rgba(35, 80, 95, 0.14); }
 
 .card, .rdetail, .region {
   display: flex;

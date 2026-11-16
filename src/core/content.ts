@@ -153,3 +153,47 @@ export const REGIONS: RegionDef[] = [
 ];
 
 export const REEF_ROUTE_COST = 50;
+
+export interface GoalDef {
+  text: string;
+  type: 'waste' | 'upgrade' | 'unit' | 'research' | 'recycler' | 'pct' | 'animals' | 'reef';
+  id?: string;
+  n: number;
+  /** Coins handed over when the goal is claimed. */
+  reward: number;
+}
+
+/** A gentle to-do list: always one clear next step, claimed in order. */
+export const GOALS: GoalDef[] = [
+  { text: 'Collect 10 pieces of waste', type: 'waste', n: 10, reward: 15 },
+  { text: 'Buy a Trash Grabber', type: 'upgrade', id: 'grabber', n: 1, reward: 20 },
+  { text: 'Hire a Beach Worker', type: 'unit', id: 'worker', n: 1, reward: 30 },
+  { text: 'Complete a research', type: 'research', n: 1, reward: 60 },
+  { text: 'Build a Recycling Station', type: 'recycler', n: 1, reward: 120 },
+  { text: 'Welcome an animal home', type: 'animals', n: 1, reward: 150 },
+  { text: 'Hire 5 Beach Workers', type: 'unit', id: 'worker', n: 5, reward: 250 },
+  { text: 'Conveyor Belts to Lv 3', type: 'upgrade', id: 'conveyor', n: 3, reward: 300 },
+  { text: 'Restore the beach to 15%', type: 'pct', n: 15, reward: 500 },
+  { text: 'Buy an Electric Cleaner', type: 'unit', id: 'cleaner', n: 1, reward: 600 },
+  { text: 'Fishing Net to Lv 3', type: 'upgrade', id: 'net', n: 3, reward: 1000 },
+  { text: 'Restore the beach to 25%', type: 'pct', n: 25, reward: 2500 },
+  { text: 'Launch a Cleanup Boat', type: 'unit', id: 'boat', n: 1, reward: 3000 },
+  { text: 'Build a Recycling Center', type: 'recycler', n: 2, reward: 6000 },
+  { text: 'Complete 5 researches', type: 'research', n: 5, reward: 8000 },
+  { text: 'Own 5 Cleanup Boats', type: 'unit', id: 'boat', n: 5, reward: 15000 },
+  { text: 'Restore the beach to 40%', type: 'pct', n: 40, reward: 25000 },
+  { text: 'Deploy a Floating Collector', type: 'unit', id: 'floater', n: 1, reward: 30000 },
+  { text: 'Welcome 6 animals home', type: 'animals', n: 6, reward: 60000 },
+  { text: 'Restore the beach to 50%', type: 'pct', n: 50, reward: 120000 },
+  { text: 'Launch a Cleanup Vessel', type: 'unit', id: 'vessel', n: 1, reward: 150000 },
+  { text: 'Build a Recycling Factory', type: 'recycler', n: 3, reward: 250000 },
+  { text: 'Complete 10 researches', type: 'research', n: 10, reward: 400000 },
+  { text: 'Restore the beach to 65%', type: 'pct', n: 65, reward: 1500000 },
+  { text: 'Launch a Cleanup Drone', type: 'unit', id: 'drone', n: 1, reward: 2000000 },
+  { text: 'Build the Recycling Complex', type: 'recycler', n: 4, reward: 4000000 },
+  { text: 'Restore the beach to 80%', type: 'pct', n: 80, reward: 15000000 },
+  { text: 'Deploy an Ocean Robot', type: 'unit', id: 'robot', n: 1, reward: 25000000 },
+  { text: 'Complete all 15 researches', type: 'research', n: 15, reward: 60000000 },
+  { text: 'Restore the beach to 100%', type: 'pct', n: 100, reward: 500000000 },
+  { text: 'Chart the Coral Reef route', type: 'reef', n: 1, reward: 1000000000 },
+];
