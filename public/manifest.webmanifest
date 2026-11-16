@@ -1,0 +1,12 @@
+{
+  "name": "Ocean Restoration",
+  "short_name": "Ocean",
+  "description": "A cozy idle game: clean a polluted beach and watch the ocean come back to life.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "./",
+  "scope": "./",
+  "background_color": "#bfeee6",
+  "theme_color": "#3cc9c4",
+  "icons": [{ "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
