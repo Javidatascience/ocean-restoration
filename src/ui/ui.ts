@@ -1,5 +1,5 @@
 // DOM interface: HUD, minimap, bottom navigation, the slide-up sheet, toasts and modals.
-import { ANIMALS, BOAT_COST, HELPERS, TOOLS, UPGRADES, type HelperId, type UpgradeId } from '../core/content.ts';
+import { ANIMALS, BOAT_COST, HELPERS, TOOLS, TREASURES, UPGRADES, type HelperId, type UpgradeId } from '../core/content.ts';
 import { fmt, fmtDuration } from '../core/format.ts';
 import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
@@ -23,7 +23,7 @@ export interface UIActions {
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
-const TITLES: Record<Tab, string> = { beach: '', tools: 'Tools', helpers: 'Helpers', map: 'Coast Map', life: 'Marine Life' };
+const TITLES: Record<Tab, string> = { beach: '', tools: 'Tools', helpers: 'Helpers', map: 'Coast Map', life: 'Finds & Life' };
 const TOOL_ICON = ['🧹', '🧹', '🪮', '🛞', '🚜', '🏎️', '🚜', '🚛', '🏭', '🦾'];
 
 export class UI {
@@ -130,7 +130,7 @@ export class UI {
 
   private sig(): string {
     const s = this.s;
-    return [this.tab, s.tool, UPGRADES.map((u) => s.upgrades[u.id]).join(','), HELPERS.map((h) => s.helpers[h.id]).join(','), s.boat, sim.doneCount(s), s.animals.length].join('|');
+    return [this.tab, s.tool, UPGRADES.map((u) => s.upgrades[u.id]).join(','), HELPERS.map((h) => s.helpers[h.id]).join(','), s.boat, sim.doneCount(s), s.animals.length, Object.values(s.finds).reduce((a, n) => a + n, 0)].join('|');
   }
 
   private hint(): void {
@@ -249,7 +249,13 @@ export class UI {
       const got = s.animals.includes(a.id);
       return `<div class="animal ${got ? '' : 'missing'}"><canvas class="ico" data-icon="animal:${a.id}"></canvas><div class="name">${got ? a.name : '???'}</div><div class="desc">${got ? a.desc : `Returns when ${a.at}% of the coast is clean`}</div></div>`;
     }).join('');
-    return `<div class="summary"><b>${s.animals.length}/${ANIMALS.length}</b> species have come home. Look for them on the clean sand and in clear water.</div><div class="animals">${cards}</div>`;
+    const kinds = TREASURES.filter((t) => s.finds[t.id]).length;
+    const finds = TREASURES.map((t) => {
+      const n = s.finds[t.id] ?? 0;
+      return `<div class="find ${n ? '' : 'missing'}"><div class="fico">${n ? t.icon : '?'}</div><div class="name">${n ? t.name : '???'}</div>${n ? `<div class="desc">×${n}</div>` : ''}</div>`;
+    }).join('');
+    return `<h3>Treasure</h3><div class="summary"><b>${kinds}/${TREASURES.length}</b> kinds found. Treasure is buried all over the coast: sweep the dirt away and it glints.</div><div class="finds">${finds}</div>
+      <h3>Animals</h3><div class="summary"><b>${s.animals.length}/${ANIMALS.length}</b> species have come home. Look for them on the clean sand and in clear water.</div><div class="animals">${cards}</div>`;
   }
 
   // ---- toasts & modals ---------------------------------------------------

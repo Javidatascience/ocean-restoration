@@ -16,13 +16,13 @@ export const TOOLS: ToolDef[] = [
   { name: 'Dustpan', desc: 'A tiny dustpan and brush. Every journey starts somewhere.', radius: 4, speed: 1, cost: 0, look: 'hand' },
   { name: 'Hand Broom', desc: 'A proper broom. Twice the reach of the dustpan.', radius: 6, speed: 1, cost: 150, look: 'hand' },
   { name: 'Beach Rake', desc: 'Wide teeth that comb the sand clean in one pass.', radius: 9, speed: 1.05, cost: 1200, look: 'hand' },
-  { name: 'Push Sweeper', desc: 'Spinning brushes on wheels. Push and watch the sand shine.', radius: 13, speed: 1.1, cost: 8000, look: 'hand' },
-  { name: 'Sand Sifter', desc: 'A little electric machine that sifts the sand as it rolls.', radius: 18, speed: 1.25, cost: 45000, look: 'machine' },
-  { name: 'Buggy Sweeper', desc: 'A beach buggy with a sweeper bar bolted on the front.', radius: 25, speed: 1.4, cost: 250000, look: 'machine' },
-  { name: 'Tractor Rake', desc: 'A tractor towing a huge rake. Whole dunes in minutes.', radius: 34, speed: 1.6, cost: 1.4e6, look: 'machine' },
-  { name: 'Sweeper Truck', desc: 'An industrial street sweeper, retrofitted for sand.', radius: 46, speed: 1.8, cost: 7e6, look: 'machine' },
-  { name: 'Mega Sifter', desc: 'A rolling factory that leaves the beach spotless.', radius: 62, speed: 2, cost: 3.5e7, look: 'machine' },
-  { name: 'Titan Cleaner', desc: 'The biggest beach cleaner ever built.', radius: 84, speed: 2.2, cost: 1.6e8, look: 'machine' },
+  { name: 'Push Sweeper', desc: 'Spinning brushes on wheels. Push and watch the sand shine.', radius: 13, speed: 1.1, cost: 12000, look: 'hand' },
+  { name: 'Sand Sifter', desc: 'A little electric machine that sifts the sand as it rolls.', radius: 18, speed: 1.25, cost: 70000, look: 'machine' },
+  { name: 'Buggy Sweeper', desc: 'A beach buggy with a sweeper bar bolted on the front.', radius: 25, speed: 1.4, cost: 400000, look: 'machine' },
+  { name: 'Tractor Rake', desc: 'A tractor towing a huge rake. Whole dunes in minutes.', radius: 34, speed: 1.6, cost: 2.2e6, look: 'machine' },
+  { name: 'Sweeper Truck', desc: 'An industrial street sweeper, retrofitted for sand.', radius: 46, speed: 1.8, cost: 1.1e7, look: 'machine' },
+  { name: 'Mega Sifter', desc: 'A rolling factory that leaves the beach spotless.', radius: 62, speed: 2, cost: 5.5e7, look: 'machine' },
+  { name: 'Titan Cleaner', desc: 'The biggest beach cleaner ever built.', radius: 84, speed: 2.2, cost: 2.5e8, look: 'machine' },
 ];
 
 export type UpgradeId = 'boots' | 'sorting' | 'magnet';
@@ -127,3 +127,38 @@ export const GOALS: GoalDef[] = [
   { text: 'Buy the Titan Cleaner', type: 'tool', n: 9, reward: 1.2e9 },
   { text: 'Clean the whole coast', type: 'pct', n: 100, reward: 5e9 },
 ];
+
+export interface TreasureDef {
+  id: string;
+  name: string;
+  icon: string;
+  desc: string;
+  /** Worth, in patches of dirt from the sector it lies in. */
+  value: number;
+  /** Relative chance of being buried somewhere. */
+  weight: number;
+}
+
+/** Things buried under the dirt: they show up when you sweep the spot clean. */
+export const TREASURES: TreasureDef[] = [
+  { id: 'shell', name: 'Pretty Shell', icon: '🐚', desc: 'Pink and pearly, perfect to hold to your ear.', value: 60, weight: 30 },
+  { id: 'glass', name: 'Sea Glass', icon: '💎', desc: 'An old bottle, polished smooth by years of waves.', value: 90, weight: 24 },
+  { id: 'coin', name: 'Old Coin', icon: '🪙', desc: 'Worn and green. Nobody knows how old it is.', value: 150, weight: 18 },
+  { id: 'bottle', name: 'Message in a Bottle', icon: '🍾', desc: 'Inside: thank you for cleaning our beach.', value: 220, weight: 12 },
+  { id: 'star', name: 'Golden Starfish', icon: '⭐', desc: 'A starfish that shines like the sun. Very rare.', value: 300, weight: 9 },
+  { id: 'pearl', name: 'Pearl', icon: '🦪', desc: 'A perfect pearl, still in its oyster.', value: 450, weight: 7 },
+  { id: 'compass', name: 'Brass Compass', icon: '🧭', desc: 'It still points north. Mostly.', value: 600, weight: 5 },
+  { id: 'anchor', name: 'Tiny Anchor', icon: '⚓', desc: 'From a model ship, or a very small boat.', value: 800, weight: 4 },
+  { id: 'watch', name: 'Pocket Watch', icon: '⌚', desc: 'Stopped at a quarter past three, long ago.', value: 1200, weight: 3 },
+  { id: 'ring', name: 'Lost Ring', icon: '💍', desc: 'Someone will be very happy to have this back.', value: 1800, weight: 2 },
+  { id: 'key', name: 'Skeleton Key', icon: '🗝️', desc: 'It must open something, somewhere on this coast.', value: 2600, weight: 1.4 },
+  { id: 'chest', name: 'Pirate Chest', icon: '🏴‍☠️', desc: 'The legend was true! Full of gold doubloons.', value: 6000, weight: 0.6 },
+];
+
+export type PowerId = 'turbo' | 'mega' | 'magnet' | 'gold';
+export const POWERS: Record<PowerId, { name: string; icon: string; desc: string; seconds: number }> = {
+  turbo: { name: 'Turbo', icon: '⚡', desc: 'Double speed', seconds: 15 },
+  mega: { name: 'Mega Brush', icon: '🌀', desc: 'Double reach', seconds: 15 },
+  magnet: { name: 'Super Magnet', icon: '🧲', desc: 'Pulls in litter and treasure from far away', seconds: 20 },
+  gold: { name: 'Golden Hour', icon: '💰', desc: 'Every patch pays triple', seconds: 15 },
+};

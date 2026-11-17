@@ -84,6 +84,18 @@ export const sfx = {
   deny(): void {
     tone(200, 0.09, 'sine', 0.1, 160);
   },
+  /** A rising note for each streak level. */
+  streak(level: number): void {
+    const f = 440 * Math.pow(2, level / 6);
+    tone(f, 0.14, 'triangle', 0.12);
+    tone(f * 1.5, 0.18, 'sine', 0.08, undefined, 0.06);
+  },
+  power(): void {
+    [660, 880, 1100, 1320].forEach((f, i) => tone(f, 0.12, 'square', 0.05, undefined, i * 0.05));
+  },
+  treasure(): void {
+    [1047, 1319, 1568, 2093].forEach((f, i) => tone(f, 0.22, 'sine', 0.1, undefined, i * 0.07));
+  },
   tab(): void {
     tone(660, 0.05, 'sine', 0.06);
   },

@@ -68,6 +68,8 @@ export const SHORE_CELL: Float32Array = (() => {
 export const isWaterCell = (gx: number, gy: number): boolean => gy + 0.5 < SHORE_CELL[gx]!;
 export const isWater = (x: number, y: number): boolean => y < shoreY(x);
 
+import { TREASURES } from './content.ts';
+
 // ---- litter: bigger pieces scattered on top of the dirt ---------------------
 
 export interface Litter {
@@ -117,6 +119,34 @@ export const LITTER: Litter[] = (() => {
       else if (roll < bigness) size = 1;
       const kind = size === 0 ? Math.floor(rand() * 4) : size === 1 ? (water ? 6 : 4) : size === 2 ? (water ? 6 : 5) : 5;
       out.push({ x, y, sector: id, size, kind, rot: (rand() - 0.5) * 1.2, water });
+    }
+  }
+  return out;
+})();
+
+// ---- treasure buried under the dirt -------------------------------------------
+
+export interface Buried {
+  x: number;
+  y: number;
+  sector: number;
+  kind: number;
+  water: boolean;
+}
+
+export const BURIED: Buried[] = (() => {
+  const rand = rng(31337);
+  const total = TREASURES.reduce((a, t) => a + t.weight, 0);
+  const out: Buried[] = [];
+  for (let id = 0; id < SECTOR_N; id++) {
+    for (let i = 0; i < 2; i++) {
+      const x = (id % SCOLS) * SECTOR + 20 + rand() * (SECTOR - 40);
+      const y = Math.floor(id / SCOLS) * SECTOR + 20 + rand() * (SECTOR - 40);
+      let roll = rand() * total;
+      if (Math.abs(y - shoreY(x)) < 12) continue;
+      let kind = 0;
+      while (kind < TREASURES.length - 1 && roll > TREASURES[kind]!.weight) { roll -= TREASURES[kind]!.weight; kind++; }
+      out.push({ x, y, sector: id, kind, water: isWater(x, y) });
     }
   }
   return out;

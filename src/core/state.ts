@@ -1,5 +1,5 @@
 import { HELPERS, UPGRADES, type HelperId, type UpgradeId } from './content.ts';
-import { GW, GH, LITTER, SECTOR, START_SECTOR, sectorCol, sectorRow } from './world.ts';
+import { BURIED, GW, GH, LITTER, SECTOR, START_SECTOR, sectorCol, sectorRow } from './world.ts';
 
 export interface GameState {
   v: 2;
@@ -25,6 +25,10 @@ export interface GameState {
   dirt: string;
   /** Litter picked up, 1 bit per piece, base64. */
   litter: string;
+  /** Buried treasure dug up, 1 bit per spot, base64. */
+  dug: string;
+  /** How many of each treasure kind you have found. */
+  finds: Record<string, number>;
 }
 
 export function newState(now = Date.now()): GameState {
@@ -36,7 +40,7 @@ export function newState(now = Date.now()): GameState {
     v: 2, coins: 0, totalCoins: 0, cleaned: 0, picked: 0, tool: 0, upgrades, helpers, boat: false,
     sectors: [START_SECTOR], done: [], animals: [], goal: 0, sound: true, lastSeen: now,
     px: (sectorCol(START_SECTOR) + 0.5) * SECTOR, py: (sectorRow(START_SECTOR) + 0.8) * SECTOR,
-    dirt: '', litter: '',
+    dirt: '', litter: '', dug: '', finds: {},
   };
 }
 
@@ -63,6 +67,7 @@ export function decodeBits(s: string, n: number, fill: number): Uint8Array {
 
 export const DIRT_CELLS = GW * GH;
 export const LITTER_N = LITTER.length;
+export const BURIED_N = BURIED.length;
 
 // ---- persistence -----------------------------------------------------------
 

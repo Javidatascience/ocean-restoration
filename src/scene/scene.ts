@@ -1,10 +1,10 @@
 // The coast seen from above. A camera follows the player; the dirt is a fine grid painted into an offscreen
 // canvas, one pixel per cell, so sweeping it away reveals the clean sand and water underneath.
-import { ANIMALS, TOOLS } from '../core/content.ts';
+import { ANIMALS, POWERS, TOOLS, TREASURES, type PowerId } from '../core/content.ts';
 import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
 import {
-  CELL, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SCOLS, SROWS, WORLD_H, WORLD_W,
+  BURIED, CELL, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SCOLS, SROWS, WORLD_H, WORLD_W,
   isSeaSector, isWater, isWaterCell, sectorAt, sectorName, shoreY,
 } from '../core/world.ts';
 import * as S from './sprites.ts';
@@ -163,10 +163,24 @@ function dirtPattern(c: C, sea: boolean): CanvasPattern {
 
 export class Scene {
   /** Sweep at a point; returns what got cleaned. Wired to the rules by main. */
-  sweepAt: (x: number, y: number, r: number, reach: sim.Reach) => sim.SweepOut = () => ({ cells: 0, coins: 0, events: [] });
-  pickAt: (x: number, y: number, reach: sim.Reach) => sim.PickOut = () => ({ coins: 0, picked: [], tooBig: [] });
+  sweepAt: (x: number, y: number, r: number, reach: sim.Reach, mult?: number) => sim.SweepOut = () => ({ cells: 0, coins: 0, events: [] });
+  pickAt: (x: number, y: number, reach: sim.Reach, extra: number) => sim.PickOut = () => ({ coins: 0, picked: [], tooBig: [] });
+  digAt: (x: number, y: number, reach: sim.Reach, extra: number) => sim.DigOut = () => ({ coins: 0, found: [], firstOfKind: [] });
   onSector: (id: number) => void = () => {};
   onTooBig: (i: number) => void = () => {};
+  onStreak: (level: number) => void = () => {};
+  onPower: (id: PowerId) => void = () => {};
+
+  // streak: keep sweeping dirt without stopping and every patch pays more
+  private streak = 0;
+  private streakLevel = 0;
+  private lastClean = -9;
+  // power-ups lying on the ground, and the ones running now
+  private powers: { id: PowerId; x: number; y: number; age: number }[] = [];
+  private active: Partial<Record<PowerId, number>> = {};
+  private powerTimer = 35;
+  /** Current sweep radius (tool, or doubled by the Mega Brush). */
+  private curR = 4;
 
   private c: C;
   private W = 390;
@@ -370,7 +384,8 @@ export class Scene {
   update(dt: number): void {
     const s = this.s;
     this.t += dt;
-    const r = sim.toolRadius(s);
+    const r = sim.toolRadius(s) * (this.active.mega ? 2 : 1);
+    this.curR = r;
 
     // movement input: joystick, keys, or walking to a tapped point
     let vx = 0;
@@ -396,7 +411,7 @@ export class Scene {
       }
     }
     const onWater = s.boat && isWater(s.px, s.py);
-    const speed = sim.moveSpeed(s, onWater);
+    const speed = sim.moveSpeed(s, onWater) * (this.active.turbo ? 2 : 1);
     this.moving = vx !== 0 || vy !== 0;
     const reach = { land: true, sea: s.boat };
     if (this.moving) {
@@ -434,6 +449,8 @@ export class Scene {
       }
     }
 
+    this.updateStreak(dt);
+    this.updatePowers(dt);
     this.updateHelpers(dt);
     this.updateCritters(dt);
 
@@ -453,8 +470,10 @@ export class Scene {
 
   private sweepHere(r: number, reach: sim.Reach): void {
     const s = this.s;
-    const res = this.sweepAt(s.px, s.py, r, reach);
+    const mult = sim.streakMult(this.streakLevel) * (this.active.gold ? 3 : 1);
+    const res = this.sweepAt(s.px, s.py, r, reach, mult);
     if (res.cells > 0) {
+      this.lastClean = this.t;
       this.coinAcc += res.coins;
       const n = Math.min(3, 1 + (res.cells >> 3));
       const sea = isWater(s.px, s.py);
@@ -466,7 +485,14 @@ export class Scene {
         });
       }
     }
-    const pk = this.pickAt(s.px, s.py, reach);
+    const extra = this.active.magnet ? 140 : 0;
+    const dig = this.digAt(s.px, s.py, reach, extra);
+    for (const i of dig.found) {
+      const b = BURIED[i]!;
+      this.burst(b.x, b.y, '255,226,130', 18, 45);
+      this.popup(b.x, b.y - 12, `${TREASURES[b.kind]!.icon} +${fmtShort(sim.treasureValue(s, i))}`, '#ffd24a', 18);
+    }
+    const pk = this.pickAt(s.px, s.py, reach, extra);
     for (const i of pk.picked) {
       const l = LITTER[i]!;
       this.flyers.push({ i, x: l.x, y: l.y, t: 0 });
@@ -477,6 +503,47 @@ export class Scene {
       this.tooBigShown = pk.tooBig[0]!;
       this.onTooBig(pk.tooBig[0]!);
     }
+  }
+
+  private updateStreak(dt: number): void {
+    if (this.t - this.lastClean < 0.8) this.streak += dt;
+    else this.streak = Math.max(0, this.streak - dt * sim.STREAK_STEP * 2);
+    const level = Math.min(8, Math.floor(this.streak / sim.STREAK_STEP));
+    if (level > this.streakLevel) this.onStreak(level);
+    this.streakLevel = level;
+  }
+
+  private updatePowers(dt: number): void {
+    const s = this.s;
+    for (const k of Object.keys(this.active) as PowerId[]) {
+      this.active[k]! -= dt;
+      if (this.active[k]! <= 0) delete this.active[k];
+    }
+    this.powerTimer -= dt;
+    if (this.powerTimer <= 0 && this.powers.length === 0 && s.cleaned > 300) {
+      this.powerTimer = 40 + Math.random() * 35;
+      const ids = Object.keys(POWERS) as PowerId[];
+      const viewW = this.W / this.zoom;
+      for (let i = 0; i < 20; i++) {
+        const a = Math.random() * TAU;
+        const d = viewW * (0.22 + Math.random() * 0.2);
+        const x = s.px + Math.cos(a) * d;
+        const y = s.py + Math.sin(a) * d;
+        if (!this.allowed(x, y)) continue;
+        this.powers.push({ id: ids[Math.floor(Math.random() * ids.length)]!, x, y, age: 0 });
+        break;
+      }
+    }
+    for (const p of this.powers) {
+      p.age += dt;
+      if (Math.hypot(p.x - s.px, p.y - s.py) < this.curR + 10) {
+        this.active[p.id] = POWERS[p.id].seconds;
+        this.burst(p.x, p.y, '255,236,140', 24, 60);
+        this.onPower(p.id);
+        p.age = 999;
+      }
+    }
+    this.powers = this.powers.filter((p) => p.age < 35);
   }
 
   private updateHelpers(dt: number): void {
@@ -763,6 +830,17 @@ export class Scene {
       add(cr.y, () => this.drawCritter(cr));
     }
     add(s.py, () => this.drawPlayer());
+    // treasure that has been uncovered but not picked up yet: it twinkles
+    for (let i = 0; i < BURIED.length; i++) {
+      if (this.f.dug[i]) continue;
+      const b = BURIED[i]!;
+      if (!inView(b.x, b.y, 20) || !sim.uncovered(this.f, i)) continue;
+      add(b.y, () => this.drawIcon(b.x, b.y - 2, TREASURES[b.kind]!.icon, 16, true));
+    }
+    for (const p of this.powers) {
+      if (!inView(p.x, p.y, 30)) continue;
+      add(p.y, () => this.drawPowerUp(p.x, p.y, p.id, p.age));
+    }
     items.sort((a, b) => a.y - b.y);
     for (const it of items) it.d();
 
@@ -816,6 +894,7 @@ export class Scene {
       c.fillText(p.text, sp.x, y);
     }
     c.globalAlpha = 1;
+    this.drawBoosts();
     if (this.stick?.dragged) {
       const st = this.stick;
       const dx = st.x - st.ox;
@@ -834,6 +913,90 @@ export class Scene {
       c.fillStyle = 'rgba(255,255,255,0.75)';
       c.fill();
     }
+  }
+
+  /** An emoji at a fixed on-screen size, standing at a world position. */
+  private drawIcon(x: number, y: number, icon: string, px: number, twinkle = false): void {
+    const c = this.c;
+    this.at(x, y, 1 / this.zoom, () => {
+      if (twinkle) {
+        const a = 0.35 + 0.35 * Math.sin(this.t * 5 + x);
+        const g = c.createRadialGradient(0, -px * 0.4, 0, 0, -px * 0.4, px * 1.1);
+        g.addColorStop(0, `rgba(255,240,170,${a})`);
+        g.addColorStop(1, 'rgba(255,240,170,0)');
+        c.fillStyle = g;
+        c.fillRect(-px * 1.2, -px * 1.6, px * 2.4, px * 2.4);
+      }
+      c.font = `${px}px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
+      c.textAlign = 'center';
+      c.textBaseline = 'bottom';
+      c.fillText(icon, 0, 0);
+    });
+  }
+
+  private drawPowerUp(x: number, y: number, id: PowerId, age: number): void {
+    const c = this.c;
+    const bob = Math.sin(this.t * 3) * 3;
+    const fade = age > 30 ? Math.max(0, 1 - (age - 30) / 5) : 1;
+    this.at(x, y, 1 / this.zoom, () => {
+      c.globalAlpha = fade;
+      c.beginPath();
+      c.ellipse(0, 2, 16, 6, 0, 0, TAU);
+      c.fillStyle = 'rgba(30,60,70,0.25)';
+      c.fill();
+      c.beginPath();
+      c.arc(0, -16 + bob, 17 + Math.sin(this.t * 6) * 1.5, 0, TAU);
+      c.fillStyle = 'rgba(255,214,90,0.95)';
+      c.fill();
+      c.lineWidth = 3;
+      c.strokeStyle = '#fff';
+      c.stroke();
+      c.font = '20px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
+      c.textAlign = 'center';
+      c.textBaseline = 'middle';
+      c.fillText(POWERS[id].icon, 0, -15 + bob);
+      c.globalAlpha = 1;
+    });
+  }
+
+  /** Bottom of the screen: the streak meter and any power-ups running. */
+  private drawBoosts(): void {
+    const c = this.c;
+    const chips: { text: string; fill: string; frac: number }[] = [];
+    if (this.streak > 1.2) {
+      const lvl = this.streakLevel;
+      const frac = lvl >= 8 ? 1 : (this.streak % sim.STREAK_STEP) / sim.STREAK_STEP;
+      chips.push({ text: `🔥 ×${sim.streakMult(lvl).toFixed(2).replace(/0$/, '').replace(/\.0$/, '')} streak`, fill: lvl >= 6 ? '#ff7043' : lvl >= 3 ? '#ffa726' : '#ffca28', frac });
+    }
+    for (const id of Object.keys(this.active) as PowerId[]) {
+      const left = this.active[id]!;
+      chips.push({ text: `${POWERS[id].icon} ${POWERS[id].name} ${Math.ceil(left)}s`, fill: '#4fc3f7', frac: left / POWERS[id].seconds });
+    }
+    if (!chips.length) return;
+    c.font = '800 13px ui-rounded, "Nunito", system-ui, sans-serif';
+    c.textBaseline = 'middle';
+    c.textAlign = 'center';
+    const widths = chips.map((ch) => c.measureText(ch.text).width + 26);
+    let x = this.W / 2 - (widths.reduce((a, w) => a + w, 0) + (chips.length - 1) * 8) / 2;
+    const y = this.H - 46;
+    chips.forEach((ch, i) => {
+      const w = widths[i]!;
+      c.fillStyle = 'rgba(255,250,240,0.94)';
+      c.beginPath();
+      c.roundRect(x, y, w, 30, 15);
+      c.fill();
+      c.save();
+      c.beginPath();
+      c.roundRect(x, y, w, 30, 15);
+      c.clip();
+      c.fillStyle = ch.fill;
+      c.globalAlpha = 0.45;
+      c.fillRect(x, y + 24, w * ch.frac, 6);
+      c.restore();
+      c.fillStyle = '#23404d';
+      c.fillText(ch.text, x + w / 2, y + 14);
+      x += w + 8;
+    });
   }
 
   private drawDecor(d: Decor): void {
@@ -897,7 +1060,7 @@ export class Scene {
 
   private drawPlayer(): void {
     const { c, s, t } = this;
-    const r = sim.toolRadius(s);
+    const r = this.curR;
     const onWater = s.boat && isWater(s.px, s.py);
     // reach ring
     c.beginPath();
@@ -918,6 +1081,8 @@ export class Scene {
       c.stroke();
     }
     const look = sim.tool(s).look;
+    {
+    const r = sim.toolRadius(s); // the sprite follows the tool, the ring may be boosted
     if (onWater) {
       this.at(s.px, s.py + Math.sin(t * 2) * 0.5, Math.max(0.45, r / 15), () => S.boat(c, t), this.dir);
     } else if (look === 'machine') {
@@ -933,6 +1098,7 @@ export class Scene {
       for (let i = 0; i < 6; i++) S.rr(c, -w / 2 + (i / 5) * (w - r * 0.1), r * 0.08, r * 0.08, r * 0.14, 0, 'rgba(60,40,20,0.6)');
       c.restore();
       this.at(s.px, s.py, hs * 0.55, () => S.person(c, t, { shirt: '#2fb7ae', hat: '#ffd98a', walk: this.moving, tool: true }), this.dir);
+    }
     }
   }
 

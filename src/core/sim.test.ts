@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { BOAT_COST, TOOLS } from './content.ts';
+import { BOAT_COST, TOOLS, TREASURES } from './content.ts';
 import * as sim from './sim.ts';
 import { decodeBits, encodeBits, newState } from './state.ts';
-import { CELLS_PER_SECTOR, LITTER, LITTER_TIER, SECTOR, SCOLS, START_SECTOR, isSeaSector, isWater, sectorCol, sectorRow } from './world.ts';
+import { BURIED, CELLS_PER_SECTOR, LITTER, LITTER_TIER, SECTOR, SCOLS, START_SECTOR, isSeaSector, isWater, sectorCol, sectorRow } from './world.ts';
 
 const LAND = { land: true, sea: false };
 const centre = (id: number) => ({ x: (sectorCol(id) + 0.5) * SECTOR, y: (sectorRow(id) + 0.5) * SECTOR });
@@ -119,5 +119,33 @@ describe('helpers and offline', () => {
     s.cleaned = 300;
     expect(sim.claimGoal(s, f)).toBeGreaterThan(0);
     expect(s.goal).toBe(1);
+  });
+});
+
+describe('streaks, power-ups and treasure', () => {
+  it('a streak multiplies what each patch pays, up to x3', () => {
+    expect(sim.streakMult(0)).toBe(1);
+    expect(sim.streakMult(4)).toBe(2);
+    expect(sim.streakMult(20)).toBe(3);
+    const s = newState(0);
+    const f = new sim.Field(s);
+    const p = centre(START_SECTOR);
+    const res = sim.sweep(s, f, p.x, p.y, 8, LAND, 3);
+    expect(res.coins).toBeCloseTo(res.cells * sim.cellValue(s, START_SECTOR) * 3);
+  });
+
+  it('treasure only shows up once the dirt over it is swept, and joins the collection', () => {
+    const s = newState(0);
+    const f = new sim.Field(s);
+    const i = BURIED.findIndex((b) => !b.water);
+    const b = BURIED[i]!;
+    expect(sim.digTreasure(s, f, b.x, b.y, LAND).found).toEqual([]); // still buried
+    sim.sweep(s, f, b.x, b.y, 6, LAND);
+    expect(sim.uncovered(f, i)).toBe(true);
+    const dug = sim.digTreasure(s, f, b.x, b.y, LAND);
+    expect(dug.found).toContain(i);
+    expect(dug.firstOfKind).toContain(i);
+    expect(s.finds[TREASURES[b.kind]!.id]).toBe(1);
+    expect(sim.digTreasure(s, f, b.x, b.y, LAND).found).toEqual([]); // only once
   });
 });

@@ -1,8 +1,8 @@
 // Pure game rules: no DOM, no timers. Shared by the game loop, offline progress, tests and the balance tool.
-import { ANIMALS, BOAT_COST, GOALS, HELPERS, TOOLS, UPGRADES, type GoalDef, type HelperId, type UpgradeId } from './content.ts';
-import { DIRT_CELLS, LITTER_N, decodeBits, encodeBits, type GameState } from './state.ts';
+import { ANIMALS, BOAT_COST, GOALS, HELPERS, TOOLS, TREASURES, UPGRADES, type GoalDef, type HelperId, type UpgradeId } from './content.ts';
+import { BURIED_N, DIRT_CELLS, LITTER_N, decodeBits, encodeBits, type GameState } from './state.ts';
 import {
-  CELL, CELLS_PER_SECTOR, DONE_FRACTION, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SEA_ROWS, SCOLS,
+  BURIED, CELL, CELLS_PER_SECTOR, DONE_FRACTION, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SEA_ROWS, SCOLS,
   isSeaSector, isWaterCell, sectorOfCell, sectorRow,
 } from './world.ts';
 
@@ -17,6 +17,7 @@ export type GameEvent =
 export class Field {
   readonly dirt: Uint8Array;
   readonly picked: Uint8Array;
+  readonly dug: Uint8Array;
   readonly left = new Int32Array(SECTOR_N);
   totalLeft = 0;
   readonly open = new Uint8Array(SECTOR_N);
@@ -26,6 +27,7 @@ export class Field {
   constructor(s: GameState) {
     this.dirt = decodeBits(s.dirt, DIRT_CELLS, 1);
     this.picked = decodeBits(s.litter, LITTER_N, 0);
+    this.dug = decodeBits(s.dug, BURIED_N, 0);
     for (let gy = 0; gy < GH; gy++) {
       for (let gx = 0; gx < GW; gx++) {
         if (this.dirt[gy * GW + gx]) { this.left[sectorOfCell(gx, gy)]!++; this.totalLeft++; }
@@ -40,6 +42,7 @@ export class Field {
   store(s: GameState): void {
     s.dirt = encodeBits(this.dirt);
     s.litter = encodeBits(this.picked);
+    s.dug = encodeBits(this.dug);
   }
   /** Fraction of a sector already clean, 0..1. */
   sectorClean(id: number): number {
@@ -179,7 +182,8 @@ export interface Reach {
 }
 
 /** Sweep a circle: every dirty cell inside it (in an open sector, on terrain you can reach) becomes clean and pays. */
-export function sweep(s: GameState, f: Field, x: number, y: number, r: number, reach: Reach): SweepOut {
+/** mult scales what the swept patches pay (streaks and Golden Hour); sector bonuses are not affected. */
+export function sweep(s: GameState, f: Field, x: number, y: number, r: number, reach: Reach, mult = 1): SweepOut {
   const out: SweepOut = { cells: 0, coins: 0, events: [] };
   const gx0 = Math.max(0, Math.floor((x - r) / CELL));
   const gx1 = Math.min(GW - 1, Math.floor((x + r) / CELL));
@@ -201,7 +205,7 @@ export function sweep(s: GameState, f: Field, x: number, y: number, r: number, r
       f.left[sec]!--;
       f.totalLeft--;
       out.cells++;
-      out.coins += cellValue(s, sec);
+      out.coins += cellValue(s, sec) * mult;
       f.onCell?.(gx, gy);
       if (!touched.includes(sec)) touched.push(sec);
     }
@@ -246,9 +250,9 @@ export interface PickOut {
 }
 
 /** Pick up litter around a point. */
-export function pickLitter(s: GameState, f: Field, x: number, y: number, reach: Reach): PickOut {
+export function pickLitter(s: GameState, f: Field, x: number, y: number, reach: Reach, extra = 0): PickOut {
   const out: PickOut = { coins: 0, picked: [], tooBig: [] };
-  const r = toolRadius(s) + magnetRange(s);
+  const r = toolRadius(s) + magnetRange(s) + extra;
   for (let i = 0; i < LITTER.length; i++) {
     if (f.picked[i]) continue;
     const l = LITTER[i]!;
@@ -268,6 +272,44 @@ export function pickLitter(s: GameState, f: Field, x: number, y: number, reach: 
   s.totalCoins += out.coins;
   return out;
 }
+
+/** Is a buried treasure uncovered (the dirt over it swept away)? */
+export function uncovered(f: Field, i: number): boolean {
+  const b = BURIED[i]!;
+  return !f.dirt[Math.floor(b.y / CELL) * GW + Math.floor(b.x / CELL)];
+}
+export function treasureValue(s: GameState, i: number): number {
+  const b = BURIED[i]!;
+  return cellValue(s, b.sector) * TREASURES[b.kind]!.value;
+}
+export interface DigOut { coins: number; found: number[]; firstOfKind: number[] }
+/** Pick up uncovered treasure within reach. */
+export function digTreasure(s: GameState, f: Field, x: number, y: number, reach: Reach, extra = 0): DigOut {
+  const out: DigOut = { coins: 0, found: [], firstOfKind: [] };
+  const r = toolRadius(s) + magnetRange(s) + extra + 6;
+  for (let i = 0; i < BURIED.length; i++) {
+    if (f.dug[i]) continue;
+    const b = BURIED[i]!;
+    if (Math.abs(b.x - x) > r || Math.abs(b.y - y) > r || Math.hypot(b.x - x, b.y - y) > r) continue;
+    if ((b.water ? !reach.sea : !reach.land) || !uncovered(f, i)) continue;
+    f.dug[i] = 1;
+    const id = TREASURES[b.kind]!.id;
+    if (!s.finds[id]) out.firstOfKind.push(i);
+    s.finds[id] = (s.finds[id] ?? 0) + 1;
+    out.coins += treasureValue(s, i);
+    out.found.push(i);
+  }
+  s.coins += out.coins;
+  s.totalCoins += out.coins;
+  return out;
+}
+
+/** Streak: the longer you keep sweeping dirt without a pause, the more each patch pays (up to x3). */
+export function streakMult(level: number): number {
+  return 1 + 0.25 * Math.min(8, level);
+}
+/** Seconds of non-stop sweeping per streak level. */
+export const STREAK_STEP = 4;
 
 function checkProgress(s: GameState, f: Field, events: GameEvent[]): void {
   const p = pct(f);

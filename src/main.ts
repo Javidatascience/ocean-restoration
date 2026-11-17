@@ -1,9 +1,9 @@
 import { setMuted, sfx, unlockAudio } from './audio.ts';
-import { TOOLS } from './core/content.ts';
+import { POWERS, TOOLS, TREASURES } from './core/content.ts';
 import { fmt } from './core/format.ts';
 import * as sim from './core/sim.ts';
 import { load, newState, save as saveState, wipe, type GameState } from './core/state.ts';
-import { LITTER, LITTER_TIER, SECTOR, sectorCol, sectorName, sectorRow } from './core/world.ts';
+import { BURIED, LITTER, LITTER_TIER, SECTOR, sectorCol, sectorName, sectorRow } from './core/world.ts';
 import { Scene } from './scene/scene.ts';
 import { UI } from './ui/ui.ts';
 
@@ -48,8 +48,8 @@ function handle(events: sim.GameEvent[], quiet = false): void {
   }
 }
 
-scene.sweepAt = (x, y, r, reach) => {
-  const res = sim.sweep(state, field, x, y, r, reach);
+scene.sweepAt = (x, y, r, reach, mult = 1) => {
+  const res = sim.sweep(state, field, x, y, r, reach, mult);
   if (res.cells) {
     earnedWindow += res.coins;
     handle(res.events);
@@ -57,8 +57,8 @@ scene.sweepAt = (x, y, r, reach) => {
   return res;
 };
 let lastPop = 0;
-scene.pickAt = (x, y, reach) => {
-  const res = sim.pickLitter(state, field, x, y, reach);
+scene.pickAt = (x, y, reach, extra) => {
+  const res = sim.pickLitter(state, field, x, y, reach, extra);
   if (res.picked.length) {
     earnedWindow += res.coins;
     const now = performance.now();
@@ -66,6 +66,29 @@ scene.pickAt = (x, y, reach) => {
     navigator.vibrate?.(8);
   }
   return res;
+};
+scene.digAt = (x, y, reach, extra) => {
+  const res = sim.digTreasure(state, field, x, y, reach, extra);
+  if (res.found.length) {
+    earnedWindow += res.coins;
+    sfx.treasure();
+    navigator.vibrate?.([10, 30, 10]);
+    for (const i of res.firstOfKind) {
+      const t = TREASURES[BURIED[i]!.kind]!;
+      ui.toast(`New treasure: ${t.name}!`, `${t.desc} Added to your collection.`, t.icon);
+    }
+    save();
+  }
+  return res;
+};
+scene.onStreak = (level) => {
+  sfx.streak(level);
+  if (level === 4 || level === 8) navigator.vibrate?.(12);
+};
+scene.onPower = (id) => {
+  sfx.power();
+  navigator.vibrate?.([8, 30, 8]);
+  ui.toast(POWERS[id].name, `${POWERS[id].desc} for ${POWERS[id].seconds} seconds!`, POWERS[id].icon);
 };
 scene.onTooBig = (i) => {
   const need = TOOLS[LITTER_TIER[LITTER[i]!.size]!]!;
