@@ -2,7 +2,7 @@
 import { ANIMALS, BOAT_COST, GOALS, HELPERS, TOOLS, TREASURES, UPGRADES, type GoalDef, type HelperId, type UpgradeId } from './content.ts';
 import { BURIED_N, DIRT_CELLS, LITTER_N, decodeBits, encodeBits, type GameState } from './state.ts';
 import {
-  BURIED, CELL, CELLS_PER_SECTOR, DONE_FRACTION, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SEA_ROWS, SCOLS,
+  BURIED, CELL, CELLS_PER_SECTOR, DONE_FRACTION, GH, GW, LITTER, MISSION_SPOTS, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SEA_ROWS, SCOLS,
   isSeaSector, isWaterCell, sectorOfCell, sectorRow,
 } from './world.ts';
 
@@ -271,6 +271,26 @@ export function pickLitter(s: GameState, f: Field, x: number, y: number, reach: 
   s.coins += out.coins;
   s.totalCoins += out.coins;
   return out;
+}
+
+export function missionReward(s: GameState, sector: number): number {
+  return Math.round(sectorValue(sector) * 0.15 * coinMult(s));
+}
+/** Pick up a sector's errand item when you reach it. Returns the spot index, or -1. */
+export function doMission(s: GameState, x: number, y: number, reach: Reach): { spot: number; reward: number } {
+  const r = toolRadius(s) + 10;
+  for (let i = 0; i < MISSION_SPOTS.length; i++) {
+    const m = MISSION_SPOTS[i]!;
+    if (s.missions.includes(m.sector)) continue;
+    if (Math.abs(m.x - x) > r || Math.abs(m.y - y) > r || Math.hypot(m.x - x, m.y - y) > r) continue;
+    if (m.water ? !reach.sea : !reach.land) continue;
+    s.missions.push(m.sector);
+    const reward = missionReward(s, m.sector);
+    s.coins += reward;
+    s.totalCoins += reward;
+    return { spot: i, reward };
+  }
+  return { spot: -1, reward: 0 };
 }
 
 /** Is a buried treasure uncovered (the dirt over it swept away)? */

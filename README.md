@@ -21,13 +21,18 @@ coins buy bigger tools, and as your tool grows the camera pulls back so you see 
 - **Treasure**: 12 kinds of treasure are buried all over the coast, from shells to a pirate chest. Sweep the dirt
   away and they glint; pick them up for coins and your collection (tap one in Life to read about it).
 - **Power-ups**: now and then one appears near you: ⚡ Turbo, 🌀 Mega Brush, 💰 Golden Hour.
+- **Errands**: every sector has a little mission that fits its theme (find the lost sunglasses, free the seal from
+  the net, ring the shipwreck's bell…). The item glows with a ❗; reach it for a reward.
+- **Life returns**: clean sectors fill up with people again: sunbathers, kids with buckets, volleyball, picnics,
+  surfers, swimmers and kayaks.
+- **Atmosphere**: a slow day cycle with a golden afternoon and a pink sunset, and a soft brushing sound while you sweep.
 - **Tools** (10): dustpan → hand broom → rake → push sweeper → sand sifter → buggy → tractor rake → sweeper truck →
   mega sifter → titan cleaner. Plus Quick Boots (speed), Sorting Skills (coins) and the Trash Magnet.
 - **Helpers**: Sand Bots and Sea Drones comb the unfinished sectors nearest to you, lane by lane, also while you are away (50%, up to 8 h).
 - **Map**: the whole coast at a glance; tap a sector to walk there. **Life**: 12 animals return as the coast
   gets cleaner, and you meet them on clean sand and in clear water.
 
-No timers, energy, ads or daily-login pressure. Progress (including the dirt grid) is saved in the browser.
+The game is in Spanish. No timers, energy, ads or daily-login pressure. Progress (including the dirt grid) is saved in the browser.
 
 ## Develop
 

@@ -1,9 +1,9 @@
-import { setMuted, sfx, unlockAudio } from './audio.ts';
-import { POWERS, TOOLS, TREASURES } from './core/content.ts';
+import { setBrush, setMuted, sfx, unlockAudio } from './audio.ts';
+import { MISSIONS, POWERS, TOOLS, TREASURES } from './core/content.ts';
 import { fmt } from './core/format.ts';
 import * as sim from './core/sim.ts';
 import { load, newState, save as saveState, wipe, type GameState } from './core/state.ts';
-import { BURIED, LITTER, LITTER_TIER, theme, SECTOR, sectorCol, sectorName, sectorRow } from './core/world.ts';
+import { BURIED, LITTER, LITTER_TIER, MISSION_SPOTS, theme, SECTOR, sectorCol, sectorName, sectorRow } from './core/world.ts';
 import { Scene } from './scene/scene.ts';
 import { UI } from './ui/ui.ts';
 
@@ -36,7 +36,7 @@ function handle(events: sim.GameEvent[], quiet = false): void {
         scene.sectorFx(e.id);
         sfx.unlock();
         navigator.vibrate?.([12, 40, 12]);
-        ui.toast(`${theme(e.id).name} is clean!`, `Sector ${sectorName(e.id)} is spotless. Bonus: ${fmt(e.bonus)} coins, and every patch now pays 3% more.`, theme(e.id).icon);
+        ui.toast(`¡${theme(e.id).name} está limpio!`, `El sector ${sectorName(e.id)} está impecable. Premio: ${fmt(e.bonus)} monedas, y cada parcela paga ahora un 3% más.`, theme(e.id).icon);
         const p = scene.playerPos();
         scene.popup(p.x, p.y - 30, '+' + fmt(e.bonus), '#ffd24a', 22);
       }
@@ -75,8 +75,21 @@ scene.digAt = (x, y, reach, extra) => {
     navigator.vibrate?.([10, 30, 10]);
     for (const i of res.firstOfKind) {
       const t = TREASURES[BURIED[i]!.kind]!;
-      ui.toast(`New treasure: ${t.name}!`, `${t.desc} Added to your collection.`, t.icon);
+      ui.toast(`¡Tesoro nuevo: ${t.name}!`, `${t.desc} Añadido a tu colección.`, t.icon);
     }
+    save();
+  }
+  return res;
+};
+scene.missionAt = (x, y, reach) => {
+  const res = sim.doMission(state, x, y, reach);
+  if (res.spot >= 0) {
+    earnedWindow += res.reward;
+    const spot = MISSION_SPOTS[res.spot]!;
+    const m = MISSIONS[theme(spot.sector).id]![spot.variant]!;
+    sfx.unlock();
+    navigator.vibrate?.([10, 30, 10]);
+    ui.toast('¡Misión cumplida!', `${m.done} +${fmt(res.reward)} monedas.`, m.icon);
     save();
   }
   return res;
@@ -84,15 +97,15 @@ scene.digAt = (x, y, reach, extra) => {
 scene.onPower = (id) => {
   sfx.power();
   navigator.vibrate?.([8, 30, 8]);
-  ui.toast(POWERS[id].name, `${POWERS[id].desc} for ${POWERS[id].seconds} seconds!`, POWERS[id].icon);
+  ui.toast(POWERS[id].name, `¡${POWERS[id].desc} durante ${POWERS[id].seconds} segundos!`, POWERS[id].icon);
 };
 scene.onTooBig = (i) => {
   const need = TOOLS[LITTER_TIER[LITTER[i]!.size]!]!;
-  ui.toast('Too big to carry', `You need a ${need.name} for this one.`, '🔒');
+  ui.toast('Demasiado grande', `Para esto necesitas: ${need.name}.`, '🔒');
 };
 scene.onSector = () => {
   sfx.deny();
-  ui.toast('The sea', 'You need the boat to clean the water. Buy it in Tools.', '⛵');
+  ui.toast('El mar', 'Necesitas el barco para limpiar el agua. Cómpralo en Equipo.', '⛵');
 };
 
 function bought(ok: boolean): boolean {
@@ -109,14 +122,14 @@ function bought(ok: boolean): boolean {
 const actions = {
   buyTool: () => {
     const ok = bought(sim.buyTool(state));
-    if (ok) { sfx.unlock(); ui.toast(sim.tool(state).name, 'Bigger reach — the view pulls back so you can see more.', '🧹'); }
+    if (ok) { sfx.unlock(); ui.toast(sim.tool(state).name, 'Más alcance: la cámara se aleja para que veas más playa.', '🧹'); }
     return ok;
   },
   buyUpgrade: (id: Parameters<typeof sim.buyUpgrade>[1]) => bought(sim.buyUpgrade(state, id)),
   buyHelper: (id: Parameters<typeof sim.buyHelper>[1]) => bought(sim.buyHelper(state, id)),
   buyBoat: () => {
     const ok = bought(sim.buyBoat(state));
-    if (ok) { sfx.unlock(); ui.toast('The boat is ready', 'Just drive into the water and start cleaning the sea.', '⛵'); }
+    if (ok) { sfx.unlock(); ui.toast('El barco está listo', 'Entra en el agua y empieza a limpiar el mar.', '⛵'); }
     return ok;
   },
   goTo: (id: number) => scene.goTo((sectorCol(id) + 0.5) * SECTOR, (sectorRow(id) + 0.5) * SECTOR),
@@ -159,13 +172,17 @@ let last = performance.now();
 let uiTimer = 0;
 let saveTimer = 0;
 let rateTimer = 0;
+let brushLevel = 0;
 
 function frame(): void {
   const now = performance.now();
   const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
+  scene.sweptNow = 0;
   scene.update(dt);
   scene.draw();
+  brushLevel += ((scene.sweptNow > 0 ? Math.min(1, 0.35 + scene.sweptNow / (dt * 400)) : 0) - brushLevel) * Math.min(1, dt * 8);
+  setBrush(brushLevel);
   rateTimer += dt;
   if (rateTimer >= 1) {
     ui.rate = ui.rate * 0.6 + (earnedWindow / rateTimer) * 0.4;
@@ -186,7 +203,7 @@ function frame(): void {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) save();
+  if (document.hidden) { save(); setBrush(0); }
   else {
     // Came back after a while: let the helpers catch up.
     const gone = (Date.now() - state.lastSeen) / 1000;

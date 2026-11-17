@@ -20,6 +20,7 @@ export function unlockAudio(): void {
     master.gain.value = muted ? 0 : 0.6;
     master.connect(ac.destination);
     ambient();
+    brush();
   } catch {
     ac = null;
   }
@@ -51,6 +52,32 @@ function ambient(): void {
   src.connect(lp).connect(g).connect(master);
   src.start();
   lfo.start();
+}
+
+let brushGain: GainNode | null = null;
+/** A soft, continuous brushing noise; louder while you are actually sweeping dirt. */
+function brush(): void {
+  if (!ac || !master) return;
+  const len = ac.sampleRate;
+  const buf = ac.createBuffer(1, len, ac.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+  const bp = ac.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 2600;
+  bp.Q.value = 0.8;
+  brushGain = ac.createGain();
+  brushGain.gain.value = 0;
+  src.connect(bp).connect(brushGain).connect(master);
+  src.start();
+}
+/** 0 = silent, 1 = sweeping at full tilt. */
+export function setBrush(level: number): void {
+  if (!ac || !brushGain) return;
+  brushGain.gain.setTargetAtTime(Math.max(0, Math.min(1, level)) * 0.045, ac.currentTime, 0.08);
 }
 
 function tone(freq: number, dur: number, type: OscillatorType, vol: number, slideTo?: number, delay = 0): void {

@@ -1,11 +1,11 @@
 // The coast seen from above. A camera follows the player; the dirt is a fine grid painted into an offscreen
 // canvas, one pixel per cell, so sweeping it away reveals the clean sand and water underneath.
-import { ANIMALS, POWERS, TOOLS, TREASURES, type PowerId } from '../core/content.ts';
+import { ANIMALS, MISSIONS, POWERS, TOOLS, TREASURES, type PowerId } from '../core/content.ts';
 import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
 import {
   BURIED, CELL, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SCOLS, SROWS, WORLD_H, WORLD_W,
-  LANDMARKS, isWater, isWaterCell, sectorAt, sectorName, sectorOfCell, shoreY, theme, type LandmarkSpot,
+  LANDMARKS, MISSION_SPOTS, isWater, isWaterCell, sectorAt, sectorName, sectorOfCell, shoreY, theme, type LandmarkSpot,
 } from '../core/world.ts';
 import * as S from './sprites.ts';
 
@@ -18,6 +18,7 @@ interface Flyer { i: number; x: number; y: number; t: number }
 interface Helper { x: number; y: number; tx: number; ty: number; sea: boolean; ph: number; dir: number; idle: number; sec: number; lane: number; turning: boolean; skip: number }
 interface Critter { id: string; x: number; y: number; tx: number; ty: number; ph: number; dir: number; wait: number }
 interface Decor { x: number; y: number; kind: number; s: number; ph: number }
+interface Visitor { x: number; y: number; kind: 'towel' | 'kid' | 'walker' | 'picnic' | 'volley' | 'surfer' | 'fisher' | 'swimmer' | 'snorkel' | 'kayak'; ph: number; dir: number; col: string }
 
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -171,6 +172,9 @@ export class Scene {
   sweepAt: (x: number, y: number, r: number, reach: sim.Reach, mult?: number) => sim.SweepOut = () => ({ cells: 0, coins: 0, events: [] });
   pickAt: (x: number, y: number, reach: sim.Reach, extra: number) => sim.PickOut = () => ({ coins: 0, picked: [], tooBig: [] });
   digAt: (x: number, y: number, reach: sim.Reach, extra: number) => sim.DigOut = () => ({ coins: 0, found: [], firstOfKind: [] });
+  missionAt: (x: number, y: number, reach: sim.Reach) => { spot: number; reward: number } = () => ({ spot: -1, reward: 0 });
+  /** Dirt cells the player swept during the last update (drives the brushing sound). */
+  sweptNow = 0;
   onSector: (id: number) => void = () => {};
   onTooBig: (i: number) => void = () => {};
   onPower: (id: PowerId) => void = () => {};
@@ -185,7 +189,7 @@ export class Scene {
   private comp = 1;
   /** Name banner shown for a moment when you walk into another sector. */
   private here = -1;
-  private banner = { text: '', t: 9 };
+  private banner = { text: '', sub: '', t: 9 };
 
   private c: C;
   private W = 390;
@@ -459,7 +463,9 @@ export class Scene {
     if (here !== this.here) {
       if (this.here >= 0 && here >= 0) {
         const th = theme(here);
-        this.banner = { text: `${th.icon} ${th.name}`, t: 0 };
+        const spot = MISSION_SPOTS.find((m) => m.sector === here);
+        const sub = spot && !s.missions.includes(here) ? (() => { const m = MISSIONS[th.id]![spot.variant]!; return `${m.icon} ${m.text}`; })() : '';
+        this.banner = { text: `${th.icon} ${th.name}`, sub, t: 0 };
       }
       this.here = here;
     }
@@ -485,6 +491,7 @@ export class Scene {
     const s = this.s;
     const mult = this.active.gold ? 3 : 1;
     const res = this.sweepAt(s.px, s.py, r, reach, mult);
+    this.sweptNow += res.cells;
     if (res.cells > 0) {
       this.coinAcc += res.coins;
       const n = Math.min(3, 1 + (res.cells >> 3));
@@ -498,6 +505,12 @@ export class Scene {
       }
     }
     const extra = 0;
+    const ms = this.missionAt(s.px, s.py, reach);
+    if (ms.spot >= 0) {
+      const m = MISSION_SPOTS[ms.spot]!;
+      this.burst(m.x, m.y, '255,214,90', 30, 60);
+      this.popup(m.x, m.y - 14, '+' + fmtShort(ms.reward), '#ffd24a', 20);
+    }
     const dig = this.digAt(s.px, s.py, reach, extra);
     for (const i of dig.found) {
       const b = BURIED[i]!;
@@ -820,6 +833,19 @@ export class Scene {
       if (!inView(l.x, l.y, 40)) continue;
       add(l.y, () => this.drawLitter(i));
     }
+    // errand items, waiting to be found
+    for (const m of MISSION_SPOTS) {
+      if (s.missions.includes(m.sector) || !inView(m.x, m.y, 30)) continue;
+      add(m.y, () => this.drawMission(m.x, m.y, MISSIONS[theme(m.sector).id]![m.variant]!.icon));
+    }
+    // once a sector is spotless, people come back to enjoy it
+    for (let row = Math.max(0, Math.floor(vy0 / SECTOR)); row <= Math.min(SROWS - 1, Math.floor(vy1 / SECTOR)); row++) {
+      for (let col = Math.max(0, Math.floor(vx0 / SECTOR)); col <= Math.min(SCOLS - 1, Math.floor(vx1 / SECTOR)); col++) {
+        const id = row * SCOLS + col;
+        if (!s.done.includes(id)) continue;
+        for (const v of this.visitorsOf(id)) if (inView(v.x, v.y, 40)) add(v.y, () => this.drawVisitor(v));
+      }
+    }
     for (const l of LANDMARKS) {
       if (!inView(l.x, l.y, 140)) continue;
       add(l.y, () => this.drawLandmark(l));
@@ -907,6 +933,7 @@ export class Scene {
 
     // --- screen space: sector signs, popups, joystick
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawDaylight();
     this.drawSigns(sc0, sc1, sr0, sr1);
     c.textAlign = 'center';
     c.textBaseline = 'middle';
@@ -925,21 +952,43 @@ export class Scene {
     }
     c.globalAlpha = 1;
     this.drawBoosts();
-    if (this.banner.t < 2.4) {
+    const show = this.banner.sub ? 4 : 2.4;
+    if (this.banner.t < show) {
       const u = this.banner.t;
-      const a = Math.min(1, u / 0.25, (2.4 - u) / 0.5);
+      const a = Math.min(1, u / 0.25, (show - u) / 0.5);
       c.globalAlpha = Math.max(0, a);
-      c.font = '800 18px ui-rounded, "Nunito", system-ui, sans-serif';
       c.textAlign = 'center';
       c.textBaseline = 'middle';
-      const w = c.measureText(this.banner.text).width + 32;
+      // keep clear of the minimap on the right, and shrink the text if it is long
+      const maxW = this.W - 104;
+      const cx = 10 + maxW / 2;
+      let subPx = 12.5;
+      c.font = `700 ${subPx}px ui-rounded, "Nunito", system-ui, sans-serif`;
+      while (this.banner.sub && subPx > 9.5 && c.measureText(this.banner.sub).width > maxW - 24) {
+        subPx -= 0.5;
+        c.font = `700 ${subPx}px ui-rounded, "Nunito", system-ui, sans-serif`;
+      }
+      const ws = this.banner.sub ? c.measureText(this.banner.sub).width : 0;
+      let titlePx = 18;
+      c.font = `800 ${titlePx}px ui-rounded, "Nunito", system-ui, sans-serif`;
+      while (titlePx > 13 && c.measureText(this.banner.text).width > maxW - 24) {
+        titlePx -= 1;
+        c.font = `800 ${titlePx}px ui-rounded, "Nunito", system-ui, sans-serif`;
+      }
+      const w = Math.min(maxW, Math.max(c.measureText(this.banner.text).width, ws) + 28);
+      const h = this.banner.sub ? 56 : 38;
       const y = 92 - (1 - a) * 8;
       c.fillStyle = 'rgba(255,250,240,0.95)';
       c.beginPath();
-      c.roundRect(this.W / 2 - w / 2, y - 19, w, 38, 19);
+      c.roundRect(cx - w / 2, y - 19, w, h, 19);
       c.fill();
       c.fillStyle = '#23404d';
-      c.fillText(this.banner.text, this.W / 2, y + 1);
+      c.fillText(this.banner.text, cx, y + 1);
+      if (this.banner.sub) {
+        c.font = `700 ${subPx}px ui-rounded, "Nunito", system-ui, sans-serif`;
+        c.fillStyle = '#17978d';
+        c.fillText(this.banner.sub, cx, y + 22);
+      }
       c.globalAlpha = 1;
     }
     if (this.stick?.dragged) {
@@ -977,6 +1026,7 @@ export class Scene {
       c.font = `${px}px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
       c.textAlign = 'center';
       c.textBaseline = 'bottom';
+      c.fillStyle = '#e8574f';
       c.fillText(icon, 0, 0);
     });
   }
@@ -1215,6 +1265,169 @@ export class Scene {
     });
   }
 
+  private drawMission(x: number, y: number, icon: string): void {
+    const c = this.c;
+    const k = this.comp;
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * 4);
+    c.beginPath();
+    c.ellipse(x, y, (9 + pulse * 4) * k, (4 + pulse * 2) * k, 0, 0, TAU);
+    c.strokeStyle = `rgba(255,214,90,${0.5 + pulse * 0.4})`;
+    c.lineWidth = 1.6 * k;
+    c.stroke();
+    this.drawIcon(x, y, icon, 18, true);
+    this.drawIcon(x, y - 20 / this.zoom - Math.abs(Math.sin(this.t * 3)) * 3 / this.zoom, '❗', 13);
+  }
+
+  private visitorCache = new Map<number, Visitor[]>();
+  /** The people who come back to a clean sector: the same ones every time. */
+  private visitorsOf(id: number): Visitor[] {
+    const hit = this.visitorCache.get(id);
+    if (hit) return hit;
+    const rand = rng(9000 + id);
+    const x0 = (id % SCOLS) * SECTOR;
+    const y0 = Math.floor(id / SCOLS) * SECTOR;
+    const out: Visitor[] = [];
+    const th = theme(id);
+    const land: Visitor['kind'][] = th.id === 'surf' ? ['surfer', 'towel', 'walker'] : th.id === 'pier' ? ['fisher', 'walker', 'towel'] : ['towel', 'kid', 'walker', 'picnic', 'volley', 'towel'];
+    const sea: Visitor['kind'][] = ['swimmer', 'kayak', 'snorkel', 'swimmer'];
+    for (let i = 0; i < 6 && out.length < 4; i++) {
+      const x = x0 + 30 + rand() * (SECTOR - 60);
+      const y = y0 + 30 + rand() * (SECTOR - 60);
+      const water = isWater(x, y);
+      if (Math.abs(y - shoreY(x)) < 16) continue;
+      const list = water ? sea : land;
+      out.push({ x, y, kind: list[Math.floor(rand() * list.length)]!, ph: rand() * TAU, dir: rand() < 0.5 ? -1 : 1, col: ['#ff6b6b', '#4fc3f7', '#ffd24a', '#b58cf0', '#4cc27a', '#ff9f43'][Math.floor(rand() * 6)]! });
+    }
+    this.visitorCache.set(id, out);
+    return out;
+  }
+
+  private drawVisitor(v: Visitor): void {
+    const { c, t } = this;
+    const k = this.comp;
+    const skin = '#f3c9a2';
+    this.at(v.x, v.y, k, () => {
+      switch (v.kind) {
+        case 'towel': {
+          c.save();
+          c.rotate(0.3 * v.dir);
+          S.rr(c, -7, -14, 14, 26, 2, v.col);
+          S.rr(c, -7, -14, 14, 4, 0, 'rgba(255,255,255,0.6)');
+          S.rr(c, -3.5, -6, 7, 14, 3.5, '#4c5d7c');
+          S.ell(c, 0, -9, 3.6, 3.6, skin);
+          S.rr(c, -2.6, -10, 5.2, 1.4, 0.6, '#222');
+          c.restore();
+          break;
+        }
+        case 'kid': {
+          S.ell(c, 8, 0, 7, 3, '#e8cf95');
+          S.rr(c, 5, -6, 5, 6, 1, '#ebd198');
+          S.rr(c, -10, -4, 4, 4, 1, '#ff6b6b');
+          this.at(0, 0, 0.45, () => S.person(c, t + v.ph, { shirt: v.col, hat: '#fff3c4', walk: false }), v.dir);
+          break;
+        }
+        case 'walker': {
+          const off = Math.sin(t * 0.25 + v.ph) * 24;
+          const dir = Math.cos(t * 0.25 + v.ph) > 0 ? 1 : -1;
+          this.at(off, 0, 0.55, () => S.person(c, t + v.ph, { shirt: v.col, hat: '#ffd98a', walk: true }), dir);
+          break;
+        }
+        case 'picnic': {
+          S.rr(c, -14, -8, 28, 18, 2, '#fff');
+          for (let i = 0; i < 4; i++) for (let j = 0; j < 3; j++) if ((i + j) % 2 === 0) S.rr(c, -14 + i * 7, -8 + j * 6, 7, 6, 0, '#e8574f');
+          S.rr(c, 2, -6, 8, 6, 1.5, '#b98d4f');
+          this.at(-16, 6, 0.45, () => S.person(c, t + v.ph, { shirt: v.col, hat: '#fff3c4', walk: false }), 1);
+          this.at(16, 6, 0.45, () => S.person(c, t + v.ph + 1, { shirt: '#4fc3f7', hat: '#ffd98a', walk: false }), -1);
+          break;
+        }
+        case 'volley': {
+          S.line(c, [0, -16, 0, 10], '#cfd6db', 1.2);
+          S.line(c, [-1, -14, 1, 8], 'rgba(255,255,255,0.7)', 3);
+          const bx = Math.sin(t * 1.6 + v.ph) * 18;
+          const by = -18 - Math.abs(Math.cos(t * 1.6 + v.ph)) * 14;
+          this.at(-20, 0, 0.5, () => S.person(c, t + v.ph, { shirt: v.col, hat: '#fff3c4', walk: false }), 1);
+          this.at(20, 0, 0.5, () => S.person(c, t + v.ph + 2, { shirt: '#ffd24a', hat: '#fff3c4', walk: false }), -1);
+          S.ell(c, bx, by, 2.4, 2.4, '#fff');
+          S.ell(c, bx, 2, 2.4, 1, 'rgba(50,40,30,0.2)');
+          break;
+        }
+        case 'surfer': {
+          c.save();
+          c.rotate(0.5 * v.dir);
+          c.beginPath();
+          c.ellipse(0, -2, 4, 13, 0, 0, TAU);
+          c.fillStyle = v.col;
+          c.fill();
+          c.restore();
+          this.at(10, 4, 0.5, () => S.person(c, t + v.ph, { shirt: '#23404d', hat: '#ffd98a', walk: false }), -v.dir);
+          break;
+        }
+        case 'fisher': {
+          this.at(0, 0, 0.5, () => S.person(c, t + v.ph, { shirt: '#4cc27a', hat: '#c79a63', walk: false }), v.dir);
+          S.line(c, [3 * v.dir, -8, 22 * v.dir, -26], '#6b4f33', 0.9);
+          S.line(c, [22 * v.dir, -26, 24 * v.dir, -4 + Math.sin(t + v.ph)], 'rgba(255,255,255,0.7)', 0.5);
+          break;
+        }
+        case 'swimmer': {
+          const bob = Math.sin(t * 2 + v.ph) * 0.8;
+          c.beginPath();
+          c.ellipse(0, 1, 7 + Math.sin(t * 2 + v.ph), 2.6, 0, 0, TAU);
+          c.strokeStyle = 'rgba(255,255,255,0.6)';
+          c.lineWidth = 0.9;
+          c.stroke();
+          S.ell(c, 0, -2 + bob, 3.2, 3.2, skin);
+          S.ell(c, 0, -3.4 + bob, 3.3, 2, v.col);
+          S.ell(c, -5, 0 + bob, 1.4, 1, skin);
+          S.ell(c, 5, 0 - bob, 1.4, 1, skin);
+          break;
+        }
+        case 'snorkel': {
+          c.beginPath();
+          c.ellipse(0, 1, 9, 3, 0, 0, TAU);
+          c.strokeStyle = 'rgba(255,255,255,0.5)';
+          c.lineWidth = 0.9;
+          c.stroke();
+          S.ell(c, 0, -1, 3, 2.4, skin);
+          S.rr(c, -2.6, -2.4, 5.2, 1.6, 0.8, '#4fc3f7');
+          S.line(c, [2, -2, 3, -8], '#ff9f43', 1);
+          break;
+        }
+        case 'kayak': {
+          const drift = Math.sin(t * 0.3 + v.ph) * 10;
+          c.save();
+          c.translate(drift, 0);
+          c.beginPath();
+          c.ellipse(0, 0, 14, 3.6, 0, 0, TAU);
+          c.fillStyle = v.col;
+          c.fill();
+          S.ell(c, 0, -1.5, 2.6, 2.6, skin);
+          const a = Math.sin(t * 3 + v.ph) * 0.6;
+          c.rotate(a);
+          S.line(c, [-10, 0, 10, 0], '#5a3d28', 1);
+          c.restore();
+          break;
+        }
+      }
+    });
+  }
+
+  /** A slow day: most of the time bright, then a golden afternoon and a pink sunset before morning comes again. */
+  private drawDaylight(): void {
+    const c = this.c;
+    const p = (this.t / 420) % 1;
+    let col = '';
+    let a = 0;
+    if (p > 0.55 && p < 0.72) { a = 0.1 * Math.min(1, (p - 0.55) / 0.05); col = '255,170,60'; }
+    else if (p >= 0.72 && p < 0.9) { a = 0.1 + 0.04 * Math.sin(((p - 0.72) / 0.18) * Math.PI); col = '255,120,110'; }
+    else if (p >= 0.9) { a = 0.1 * (1 - (p - 0.9) / 0.1); col = '255,140,120'; }
+    if (a <= 0.005) return;
+    c.save();
+    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    c.fillStyle = `rgba(${col},${a})`;
+    c.fillRect(0, 0, this.W, this.H);
+    c.restore();
+  }
+
   private drawDecor(d: Decor): void {
     const c = this.c;
     switch (d.kind) {
@@ -1394,7 +1607,7 @@ export class Scene {
     if (!this.s.boat) {
       const sy = this.toScreen(this.camX, shoreY(this.camX) - 60).y;
       if (sy > 70 && sy < this.H - 40) {
-        const text = '⛵ The sea needs a boat';
+        const text = '⛵ Para el mar necesitas barco';
         c.font = '800 13px ui-rounded, "Nunito", system-ui, sans-serif';
         const w = c.measureText(text).width + 22;
         c.fillStyle = 'rgba(255,250,240,0.92)';

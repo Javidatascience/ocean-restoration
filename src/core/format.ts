@@ -15,7 +15,7 @@ export function fmt(n: number): string {
 
 export function fmtDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
-  if (m < 1) return 'a moment';
+  if (m < 1) return 'un momento';
   if (m < 60) return `${m} min`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;

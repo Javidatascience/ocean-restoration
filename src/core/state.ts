@@ -29,6 +29,8 @@ export interface GameState {
   dug: string;
   /** How many of each treasure kind you have found. */
   finds: Record<string, number>;
+  /** Sectors whose errand is done. */
+  missions: number[];
 }
 
 export function newState(now = Date.now()): GameState {
@@ -40,7 +42,7 @@ export function newState(now = Date.now()): GameState {
     v: 2, coins: 0, totalCoins: 0, cleaned: 0, picked: 0, tool: 0, upgrades, helpers, boat: false,
     sectors: [START_SECTOR], done: [], animals: [], goal: 0, sound: true, lastSeen: now,
     px: (sectorCol(START_SECTOR) + 0.5) * SECTOR, py: (sectorRow(START_SECTOR) + 0.8) * SECTOR,
-    dirt: '', litter: '', dug: '', finds: {},
+    dirt: '', litter: '', dug: '', finds: {}, missions: [],
   };
 }
 
