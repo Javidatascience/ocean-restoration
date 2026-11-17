@@ -70,6 +70,98 @@ export const isWater = (x: number, y: number): boolean => y < shoreY(x);
 
 import { TREASURES } from './content.ts';
 
+// ---- sector themes: every sector has its own name, look, litter and landmark ----------
+
+export type Landmark = 'castle' | 'umbrella' | 'hut' | 'tower' | 'logs' | 'boulders' | 'fence' | 'surf' | 'pier' | 'pool' | 'wreck' | 'buoy' | 'reef' | 'none';
+
+export interface ThemeDef {
+  id: string;
+  name: string;
+  icon: string;
+  zone: 'land' | 'shore' | 'sea';
+  /** Base colour of the grime. */
+  dirt: [number, number, number];
+  /** Litter sprite kinds for small and big pieces (see sprites.trash). */
+  small: number[];
+  big: number[];
+  litter: number;
+  /** Ground decoration kinds (0 shell, 1 pebble, 2 grass, 3-5 coral, 6 seagrass, 7 rock) and how many. */
+  decor: number[];
+  decorN: number;
+  palms: number;
+  landmark: Landmark;
+}
+
+export const THEMES: ThemeDef[] = [
+  { id: 'castle', name: 'Sandcastle Flats', icon: '🏰', zone: 'land', dirt: [134, 116, 90], small: [0, 1, 2, 3], big: [4, 5], litter: 7, decor: [0, 0, 1, 2], decorN: 16, palms: 0, landmark: 'castle' },
+  { id: 'picnic', name: 'Picnic Cove', icon: '🧺', zone: 'land', dirt: [128, 106, 80], small: [1, 3, 3, 2, 1], big: [4], litter: 11, decor: [0, 1], decorN: 14, palms: 1, landmark: 'umbrella' },
+  { id: 'dunes', name: 'Windy Dunes', icon: '🌾', zone: 'land', dirt: [150, 132, 100], small: [1, 0], big: [4], litter: 6, decor: [2, 2, 2, 1], decorN: 30, palms: 0, landmark: 'fence' },
+  { id: 'rocks', name: 'Rocky Point', icon: '🪨', zone: 'land', dirt: [112, 108, 100], small: [2, 0], big: [5, 4], litter: 7, decor: [1, 1, 7, 7], decorN: 24, palms: 0, landmark: 'boulders' },
+  { id: 'grove', name: 'Palm Grove', icon: '🌴', zone: 'land', dirt: [116, 104, 76], small: [0, 2, 1], big: [4], litter: 7, decor: [2, 0, 1], decorN: 16, palms: 4, landmark: 'none' },
+  { id: 'bar', name: 'Beach Bar', icon: '🍹', zone: 'land', dirt: [126, 104, 86], small: [0, 2, 0, 3], big: [5], litter: 11, decor: [0, 1], decorN: 12, palms: 1, landmark: 'hut' },
+  { id: 'drift', name: 'Driftwood Bay', icon: '🪵', zone: 'land', dirt: [98, 84, 66], small: [1, 0, 2], big: [4, 5], litter: 8, decor: [1, 2, 1], decorN: 16, palms: 0, landmark: 'logs' },
+  { id: 'guard', name: 'Lifeguard Post', icon: '🛟', zone: 'land', dirt: [130, 114, 88], small: [3, 1, 0], big: [4], litter: 8, decor: [0, 1], decorN: 14, palms: 1, landmark: 'tower' },
+  { id: 'pools', name: 'Tide Pools', icon: '🦀', zone: 'shore', dirt: [104, 104, 92], small: [0, 2], big: [6, 4], litter: 7, decor: [7, 7, 0, 6, 1], decorN: 22, palms: 0, landmark: 'pool' },
+  { id: 'surf', name: 'Surf Point', icon: '🏄', zone: 'shore', dirt: [126, 112, 90], small: [0, 3, 1], big: [4], litter: 8, decor: [0, 1, 6], decorN: 14, palms: 1, landmark: 'surf' },
+  { id: 'pier', name: 'Old Pier', icon: '🎣', zone: 'shore', dirt: [110, 96, 76], small: [0, 2], big: [6, 5], litter: 8, decor: [1, 6, 7], decorN: 14, palms: 0, landmark: 'pier' },
+  { id: 'shallows', name: 'Turquoise Shallows', icon: '🐠', zone: 'sea', dirt: [80, 96, 76], small: [0, 1], big: [6], litter: 7, decor: [6, 6, 7], decorN: 14, palms: 0, landmark: 'none' },
+  { id: 'coral', name: 'Coral Garden', icon: '🪸', zone: 'sea', dirt: [84, 92, 80], small: [1, 0], big: [6], litter: 7, decor: [3, 4, 5, 3, 4, 5, 6], decorN: 28, palms: 0, landmark: 'reef' },
+  { id: 'kelp', name: 'Kelp Forest', icon: '🌿', zone: 'sea', dirt: [62, 90, 58], small: [1, 0, 2], big: [6], litter: 7, decor: [6, 6, 6, 7], decorN: 32, palms: 0, landmark: 'none' },
+  { id: 'wreck', name: 'Shipwreck Reef', icon: '⚓', zone: 'sea', dirt: [70, 76, 70], small: [2, 0], big: [5, 6], litter: 9, decor: [7, 3, 6], decorN: 14, palms: 0, landmark: 'wreck' },
+  { id: 'fishing', name: 'Fishing Grounds', icon: '🐟', zone: 'sea', dirt: [76, 88, 74], small: [1, 0], big: [6, 6, 4], litter: 9, decor: [6, 7], decorN: 10, palms: 0, landmark: 'buoy' },
+];
+
+/** Theme of every sector: fixed for everyone, neighbours never share one. */
+export const THEME_OF: number[] = (() => {
+  const rand = rng(2468);
+  const out: number[] = [];
+  const pick = (zone: ThemeDef['zone']) => THEMES.map((t, i) => (t.zone === zone ? i : -1)).filter((i) => i >= 0);
+  for (let id = 0; id < SECTOR_N; id++) {
+    const row = Math.floor(id / SCOLS);
+    const zone = row >= SEA_ROWS ? 'land' : row === SEA_ROWS - 1 ? 'shore' : 'sea';
+    const options = pick(zone);
+    let t = options[Math.floor(rand() * options.length)]!;
+    for (let k = 0; k < 6; k++) {
+      const left = id % SCOLS > 0 ? out[id - 1] : -1;
+      const up = row > 0 ? out[id - SCOLS] : -1;
+      if (t !== left && t !== up) break;
+      t = options[Math.floor(rand() * options.length)]!;
+    }
+    out.push(t);
+  }
+  out[START_SECTOR] = 0;
+  return out;
+})();
+export const theme = (id: number): ThemeDef => THEMES[THEME_OF[id]!]!;
+
+export interface LandmarkSpot { x: number; y: number; sector: number; kind: Landmark; flip: number }
+
+/** One landmark per sector that has one, placed on the right terrain. */
+export const LANDMARKS: LandmarkSpot[] = (() => {
+  const rand = rng(1357);
+  const out: LandmarkSpot[] = [];
+  for (let id = 0; id < SECTOR_N; id++) {
+    const th = theme(id);
+    if (th.landmark === 'none') continue;
+    const x0 = (id % SCOLS) * SECTOR;
+    const y0 = Math.floor(id / SCOLS) * SECTOR;
+    const flip = rand() < 0.5 ? -1 : 1;
+    for (let k = 0; k < 20; k++) {
+      const x = x0 + 70 + rand() * (SECTOR - 140);
+      let y = y0 + 70 + rand() * (SECTOR - 140);
+      if (th.zone === 'shore') {
+        if (th.landmark === 'pier') y = shoreY(x) + 8;
+        else y = shoreY(x) + (th.landmark === 'pool' ? 22 : 40) + rand() * 30;
+        if (y > y0 + SECTOR - 10) continue;
+      } else if (th.zone === 'sea' ? !isWater(x, y - 30) : isWater(x, y)) continue;
+      if (id === START_SECTOR && Math.hypot(x - (x0 + SECTOR / 2), y - (y0 + SECTOR * 0.8)) < 60) continue;
+      out.push({ x, y, sector: id, kind: th.landmark, flip });
+      break;
+    }
+  }
+  return out;
+})();
+
 // ---- litter: bigger pieces scattered on top of the dirt ---------------------
 
 export interface Litter {
@@ -104,8 +196,8 @@ export const LITTER: Litter[] = (() => {
   const out: Litter[] = [];
   for (let id = 0; id < SECTOR_N; id++) {
     const d = ring(id);
-    const n = 7;
-    for (let i = 0; i < n; i++) {
+    const th = theme(id);
+    for (let i = 0; i < th.litter; i++) {
       const x = (id % SCOLS) * SECTOR + 18 + rand() * (SECTOR - 36);
       const y = Math.floor(id / SCOLS) * SECTOR + 18 + rand() * (SECTOR - 36);
       const water = isWater(x, y);
@@ -117,7 +209,8 @@ export const LITTER: Litter[] = (() => {
       if (roll < bigness * 0.25) size = 3;
       else if (roll < bigness * 0.55) size = 2;
       else if (roll < bigness) size = 1;
-      const kind = size === 0 ? Math.floor(rand() * 4) : size === 1 ? (water ? 6 : 4) : size === 2 ? (water ? 6 : 5) : 5;
+      const list = size === 0 ? th.small : th.big;
+      const kind = size === 3 ? (water ? 6 : 5) : list[Math.floor(rand() * list.length)]!;
       out.push({ x, y, sector: id, size, kind, rot: (rand() - 0.5) * 1.2, water });
     }
   }

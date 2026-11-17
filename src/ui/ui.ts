@@ -3,7 +3,7 @@ import { ANIMALS, BOAT_COST, HELPERS, TOOLS, TREASURES, UPGRADES, type HelperId,
 import { fmt, fmtDuration } from '../core/format.ts';
 import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
-import { LITTER, SECTOR_N, SEA_ROWS, sectorAt, sectorName, sectorRow } from '../core/world.ts';
+import { LITTER, SECTOR_N, SEA_ROWS, sectorAt, sectorName, sectorRow, theme } from '../core/world.ts';
 import type { Scene } from '../scene/scene.ts';
 import { paintIcon } from '../scene/sprites.ts';
 
@@ -76,6 +76,7 @@ export class UI {
     else if (kind === 'upgrade') ok = this.act.buyUpgrade(id as UpgradeId);
     else if (kind === 'helper') ok = this.act.buyHelper(id as HelperId);
     else if (kind === 'boat') ok = this.act.buyBoat();
+    else if (kind === 'find') { this.findModal(id!); return; }
     else if (kind === 'sound') this.act.toggleSound();
     else if (kind === 'reset') { this.confirmReset(); return; }
     if (ok === false) {
@@ -108,7 +109,7 @@ export class UI {
       $('tool').textContent = t.name;
       $('tool-sub').textContent = `reach ${t.radius} · speed ${Math.round(sim.moveSpeed(s))}`;
       const done = here >= 0 && s.done.includes(here);
-      $('sector-name').textContent = here >= 0 ? `📍 Sector ${sectorName(here)}${done ? ' · clean ✨' : ''}` : '';
+      $('sector-name').textContent = here >= 0 ? `${theme(here).icon} ${theme(here).name}${done ? ' ✨' : ''}` : '';
       $('sector-pct').textContent = `${Math.floor(secPct)}%`;
       $('sector-fill').style.width = secPct + '%';
       $('pct').textContent = `🌊 Coast ${coast < 10 ? coast.toFixed(2) : coast.toFixed(1)}%`;
@@ -252,7 +253,7 @@ export class UI {
     const kinds = TREASURES.filter((t) => s.finds[t.id]).length;
     const finds = TREASURES.map((t) => {
       const n = s.finds[t.id] ?? 0;
-      return `<div class="find ${n ? '' : 'missing'}"><div class="fico">${n ? t.icon : '?'}</div><div class="name">${n ? t.name : '???'}</div>${n ? `<div class="desc">×${n}</div>` : ''}</div>`;
+      return `<div class="find ${n ? '' : 'missing'}" data-act="find:${t.id}"><div class="fico">${n ? t.icon : '?'}</div><div class="name">${n ? t.name : '???'}</div>${n ? `<div class="desc">×${n}</div>` : ''}</div>`;
     }).join('');
     return `<h3>Treasure</h3><div class="summary"><b>${kinds}/${TREASURES.length}</b> kinds found. Treasure is buried all over the coast: sweep the dirt away and it glints.</div><div class="finds">${finds}</div>
       <h3>Animals</h3><div class="summary"><b>${s.animals.length}/${ANIMALS.length}</b> species have come home. Look for them on the clean sand and in clear water.</div><div class="animals">${cards}</div>`;
@@ -304,6 +305,19 @@ export class UI {
     ].join('');
     const note = r.capped ? `<p class="note">Your helpers rest after ${Math.round(r.seconds / 3600)} hours away.</p>` : '';
     this.modal(`<div class="big">🌅</div><h2>Welcome back!</h2><p>While you were away (${fmtDuration(r.seconds)}) your helpers kept sweeping:</p><ul class="gains">${lines}</ul>${note}`, [{ label: 'Lovely!' }]);
+  }
+
+  /** A treasure from the collection, up close. */
+  private findModal(id: string): void {
+    const t = TREASURES.find((x) => x.id === id);
+    if (!t) return;
+    this.act.tabSound();
+    const n = this.s.finds[id] ?? 0;
+    if (!n) {
+      this.modal('<div class="big">❔</div><h2>Not found yet</h2><p>It is buried somewhere on the coast. Sweep the dirt away and look for a glint.</p>', [{ label: 'Keep looking' }]);
+      return;
+    }
+    this.modal(`<div class="big">${t.icon}</div><h2>${t.name}</h2><p>${t.desc}</p><ul class="gains"><li><span>🔎</span><div>Found <b>${n}</b> time${n > 1 ? 's' : ''}</div></li><li><span>✨</span><div>Rarity: <b>${t.weight >= 12 ? 'common' : t.weight >= 4 ? 'uncommon' : t.weight >= 1.5 ? 'rare' : 'legendary'}</b></div></li></ul>`, [{ label: 'Lovely' }]);
   }
 
   completeModal(): void {

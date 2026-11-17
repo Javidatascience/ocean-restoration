@@ -5,7 +5,7 @@ import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
 import {
   BURIED, CELL, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SCOLS, SROWS, WORLD_H, WORLD_W,
-  isSeaSector, isWater, isWaterCell, sectorAt, sectorName, shoreY,
+  LANDMARKS, isWater, isWaterCell, sectorAt, sectorName, sectorOfCell, shoreY, theme, type LandmarkSpot,
 } from '../core/world.ts';
 import * as S from './sprites.ts';
 
@@ -58,14 +58,16 @@ const DECOR: Decor[] = (() => {
   for (let id = 0; id < SECTOR_N; id++) {
     const x0 = (id % SCOLS) * SECTOR;
     const y0 = Math.floor(id / SCOLS) * SECTOR;
-    for (let i = 0; i < 16; i++) {
+    const th = theme(id);
+    const wet = th.decor.filter((k) => k >= 3);
+    const dry = th.decor.filter((k) => k <= 2 || k === 7);
+    for (let i = 0; i < th.decorN; i++) {
       const x = x0 + rand() * SECTOR;
       const y = y0 + rand() * SECTOR;
       const off = shoreY(x) - y;
       if (Math.abs(off) < 10) continue;
-      const water = off > 0;
-      const kind = water ? (off > 260 ? 3 + Math.floor(rand() * 3) : rand() < 0.6 ? 6 : 7) : Math.floor(rand() * 3);
-      out.push({ x, y, kind, s: 0.7 + rand() * 0.6, ph: rand() * TAU });
+      const list = off > 0 ? (wet.length ? wet : [6, 7]) : (dry.length ? dry : [0, 1]);
+      out.push({ x, y, kind: list[Math.floor(rand() * list.length)]!, s: 0.7 + rand() * 0.6, ph: rand() * TAU });
     }
   }
   return out;
@@ -75,10 +77,13 @@ const PALMS: Decor[] = (() => {
   const rand = rng(99);
   const out: Decor[] = [];
   for (let id = 0; id < SECTOR_N; id++) {
-    if (isSeaSector(id) || rand() < 0.45) continue;
-    const x = (id % SCOLS) * SECTOR + 40 + rand() * (SECTOR - 80);
-    const y = Math.floor(id / SCOLS) * SECTOR + 40 + rand() * (SECTOR - 80);
-    out.push({ x, y, kind: id, s: 0.95 + rand() * 0.35, ph: rand() * TAU });
+    const n = theme(id).palms;
+    for (let i = 0; i < n; i++) {
+      const x = (id % SCOLS) * SECTOR + 40 + rand() * (SECTOR - 80);
+      const y = Math.floor(id / SCOLS) * SECTOR + 40 + rand() * (SECTOR - 80);
+      if (isWater(x, y - 20)) continue;
+      out.push({ x, y, kind: id, s: 0.95 + rand() * 0.35, ph: rand() * TAU });
+    }
   }
   return out;
 })();
@@ -168,19 +173,17 @@ export class Scene {
   digAt: (x: number, y: number, reach: sim.Reach, extra: number) => sim.DigOut = () => ({ coins: 0, found: [], firstOfKind: [] });
   onSector: (id: number) => void = () => {};
   onTooBig: (i: number) => void = () => {};
-  onStreak: (level: number) => void = () => {};
   onPower: (id: PowerId) => void = () => {};
 
-  // streak: keep sweeping dirt without stopping and every patch pays more
-  private streak = 0;
-  private streakLevel = 0;
-  private lastClean = -9;
   // power-ups lying on the ground, and the ones running now
   private powers: { id: PowerId; x: number; y: number; age: number }[] = [];
   private active: Partial<Record<PowerId, number>> = {};
   private powerTimer = 35;
   /** Current sweep radius (tool, or doubled by the Mega Brush). */
   private curR = 4;
+  /** Name banner shown for a moment when you walk into another sector. */
+  private here = -1;
+  private banner = { text: '', t: 9 };
 
   private c: C;
   private W = 390;
@@ -255,8 +258,8 @@ export class Scene {
         const o = i * 4;
         const h = hash(gx, gy);
         const sea = isWaterCell(gx, gy);
-        const pal = sea ? SEA_DIRT : LAND_DIRT;
-        const col = pal[0]!;
+        const th = theme(sectorOfCell(gx, gy));
+        const col = sea ? (th.zone === 'sea' ? th.dirt : SEA_DIRT[0]!) : (th.zone === 'sea' ? LAND_DIRT[0]! : th.dirt);
         // soft large-scale blotches; the fine detail comes from the texture drawn on top
         const blot = 0.8 + 0.3 * (0.75 * noise(gx / 9, gy / 9) + 0.25 * h);
         d[o] = Math.min(255, col[0]! * blot);
@@ -449,8 +452,16 @@ export class Scene {
       }
     }
 
-    this.updateStreak(dt);
     this.updatePowers(dt);
+    const here = sectorAt(s.px, s.py);
+    if (here !== this.here) {
+      if (this.here >= 0 && here >= 0) {
+        const th = theme(here);
+        this.banner = { text: `${th.icon} ${th.name}`, t: 0 };
+      }
+      this.here = here;
+    }
+    this.banner.t += dt;
     this.updateHelpers(dt);
     this.updateCritters(dt);
 
@@ -470,10 +481,9 @@ export class Scene {
 
   private sweepHere(r: number, reach: sim.Reach): void {
     const s = this.s;
-    const mult = sim.streakMult(this.streakLevel) * (this.active.gold ? 3 : 1);
+    const mult = this.active.gold ? 3 : 1;
     const res = this.sweepAt(s.px, s.py, r, reach, mult);
     if (res.cells > 0) {
-      this.lastClean = this.t;
       this.coinAcc += res.coins;
       const n = Math.min(3, 1 + (res.cells >> 3));
       const sea = isWater(s.px, s.py);
@@ -485,7 +495,7 @@ export class Scene {
         });
       }
     }
-    const extra = this.active.magnet ? 140 : 0;
+    const extra = 0;
     const dig = this.digAt(s.px, s.py, reach, extra);
     for (const i of dig.found) {
       const b = BURIED[i]!;
@@ -503,14 +513,6 @@ export class Scene {
       this.tooBigShown = pk.tooBig[0]!;
       this.onTooBig(pk.tooBig[0]!);
     }
-  }
-
-  private updateStreak(dt: number): void {
-    if (this.t - this.lastClean < 0.8) this.streak += dt;
-    else this.streak = Math.max(0, this.streak - dt * sim.STREAK_STEP * 2);
-    const level = Math.min(8, Math.floor(this.streak / sim.STREAK_STEP));
-    if (level > this.streakLevel) this.onStreak(level);
-    this.streakLevel = level;
   }
 
   private updatePowers(dt: number): void {
@@ -593,7 +595,7 @@ export class Scene {
     if (h.turning) {
       // reached the lane start: sweep across to the other side
       h.turning = false;
-      h.tx = h.dir > 0 ? x0 + SECTOR - r * 0.5 : x0 + r * 0.5;
+      h.tx = h.dir > 0 ? x0 + SECTOR - 1 : x0 + 1;
       return;
     }
     // finished a lane (or just arrived): find the next lane that still has dirt for us
@@ -608,7 +610,7 @@ export class Scene {
     }
     h.lane = lane;
     h.dir = Math.abs(h.x - x0) < Math.abs(h.x - (x0 + SECTOR)) ? 1 : -1;
-    h.tx = h.dir > 0 ? x0 + r * 0.5 : x0 + SECTOR - r * 0.5;
+    h.tx = h.dir > 0 ? x0 + 1 : x0 + SECTOR - 1;
     h.ty = ys[lane]!;
     h.turning = true;
   }
@@ -814,6 +816,10 @@ export class Scene {
       if (!inView(l.x, l.y, 40)) continue;
       add(l.y, () => this.drawLitter(i));
     }
+    for (const l of LANDMARKS) {
+      if (!inView(l.x, l.y, 140)) continue;
+      add(l.y, () => this.drawLandmark(l));
+    }
     for (const p of PALMS) {
       if (!inView(p.x, p.y, 90)) continue;
       const health = s.done.includes(p.kind) ? 1 : 0.15 + 0.7 * this.f.sectorClean(p.kind);
@@ -895,6 +901,23 @@ export class Scene {
     }
     c.globalAlpha = 1;
     this.drawBoosts();
+    if (this.banner.t < 2.4) {
+      const u = this.banner.t;
+      const a = Math.min(1, u / 0.25, (2.4 - u) / 0.5);
+      c.globalAlpha = Math.max(0, a);
+      c.font = '800 18px ui-rounded, "Nunito", system-ui, sans-serif';
+      c.textAlign = 'center';
+      c.textBaseline = 'middle';
+      const w = c.measureText(this.banner.text).width + 32;
+      const y = 92 - (1 - a) * 8;
+      c.fillStyle = 'rgba(255,250,240,0.95)';
+      c.beginPath();
+      c.roundRect(this.W / 2 - w / 2, y - 19, w, 38, 19);
+      c.fill();
+      c.fillStyle = '#23404d';
+      c.fillText(this.banner.text, this.W / 2, y + 1);
+      c.globalAlpha = 1;
+    }
     if (this.stick?.dragged) {
       const st = this.stick;
       const dx = st.x - st.ox;
@@ -959,15 +982,10 @@ export class Scene {
     });
   }
 
-  /** Bottom of the screen: the streak meter and any power-ups running. */
+  /** Bottom of the screen: the power-ups running now. */
   private drawBoosts(): void {
     const c = this.c;
     const chips: { text: string; fill: string; frac: number }[] = [];
-    if (this.streak > 1.2) {
-      const lvl = this.streakLevel;
-      const frac = lvl >= 8 ? 1 : (this.streak % sim.STREAK_STEP) / sim.STREAK_STEP;
-      chips.push({ text: `🔥 ×${sim.streakMult(lvl).toFixed(2).replace(/0$/, '').replace(/\.0$/, '')} streak`, fill: lvl >= 6 ? '#ff7043' : lvl >= 3 ? '#ffa726' : '#ffca28', frac });
-    }
     for (const id of Object.keys(this.active) as PowerId[]) {
       const left = this.active[id]!;
       chips.push({ text: `${POWERS[id].icon} ${POWERS[id].name} ${Math.ceil(left)}s`, fill: '#4fc3f7', frac: left / POWERS[id].seconds });
@@ -996,6 +1014,180 @@ export class Scene {
       c.fillStyle = '#23404d';
       c.fillText(ch.text, x + w / 2, y + 14);
       x += w + 8;
+    });
+  }
+
+  /** The thing that makes each sector recognisable. Sizes are in world pixels. */
+  private drawLandmark(l: LandmarkSpot): void {
+    const { c, t } = this;
+    const sh = (rx: number, ry: number) => S.ell(c, 0, 1, rx, ry, 'rgba(50,40,30,0.22)');
+    this.at(l.x, l.y, 1, () => {
+      switch (l.kind) {
+        case 'castle': {
+          sh(36, 9);
+          S.rr(c, -30, -18, 60, 18, 3, '#e2c486');
+          for (const [x, h] of [[-32, 32], [18, 32], [-8, 42]] as const) {
+            S.rr(c, x, -h, 14, h, 2, '#ebd198');
+            for (let k = 0; k < 3; k++) S.rr(c, x + k * 5, -h - 4, 3.4, 4, 0.6, '#ebd198');
+          }
+          S.rr(c, -4, -12, 8, 12, 4, '#b8975c');
+          S.line(c, [-1, -46, -1, -62], '#7a5a3a', 1.4);
+          const wave = Math.sin(t * 4) * 1.5;
+          S.poly(c, [-1, -62, 11, -58 + wave, -1, -54], '#ff6b6b');
+          for (const [x, y] of [[-22, -6], [26, -8], [10, -24]] as const) S.ell(c, x, y, 2, 1.4, '#ffd6c9');
+          break;
+        }
+        case 'umbrella': {
+          c.save();
+          c.rotate(-0.25 * l.flip);
+          S.rr(c, -10, -6, 34, 14, 2, '#5cc6e8');
+          for (let k = 0; k < 4; k++) S.rr(c, -10 + k * 9, -6, 4.5, 14, 0, '#ffffff');
+          c.restore();
+          sh(26, 7);
+          S.line(c, [0, 0, 0, -38], '#cfd6db', 1.6);
+          const cols = ['#ff6b6b', '#ffffff', '#ffd24a', '#ffffff', '#ff6b6b', '#ffffff'];
+          for (let k = 0; k < 6; k++) {
+            const a0 = Math.PI + (k / 6) * Math.PI;
+            const a1 = Math.PI + ((k + 1) / 6) * Math.PI;
+            c.beginPath();
+            c.moveTo(0, -38);
+            c.ellipse(0, -38, 30, 12, 0, a0, a1);
+            c.closePath();
+            c.fillStyle = cols[k]!;
+            c.fill();
+          }
+          S.ell(c, -18, 8, 6, 3, '#ffb36b');
+          break;
+        }
+        case 'hut': {
+          sh(34, 9);
+          for (const x of [-26, 22]) S.rr(c, x, -34, 4, 34, 1, '#8a6a4a');
+          S.rr(c, -26, -16, 52, 16, 2, '#a07850');
+          S.rr(c, -28, -18, 56, 4, 1, '#c79a63');
+          S.poly(c, [-38, -32, 0, -54, 38, -32, 30, -28, -30, -28], '#e3c26e');
+          for (let k = -30; k <= 30; k += 6) S.line(c, [k, -29, k * 0.2, -50], 'rgba(150,110,50,0.5)', 0.8);
+          S.rr(c, -12, -44, 24, 9, 2, '#2fb7ae');
+          c.font = '800 7px ui-rounded, system-ui, sans-serif';
+          c.textAlign = 'center';
+          c.textBaseline = 'middle';
+          c.fillStyle = '#fff';
+          c.fillText('BAR', 0, -39.5);
+          S.rr(c, -14, -24, 4, 7, 1, '#7fd0e8');
+          S.rr(c, 8, -24, 4, 7, 1, '#ff9f43');
+          break;
+        }
+        case 'tower': {
+          sh(24, 7);
+          S.line(c, [-14, 0, -10, -30], '#f2f2f2', 2.4);
+          S.line(c, [14, 0, 10, -30], '#f2f2f2', 2.4);
+          S.line(c, [-12, -12, 12, -12], '#e0e0e0', 1.6);
+          S.rr(c, -16, -34, 32, 5, 1, '#e8574f');
+          S.rr(c, -12, -54, 24, 20, 2, '#ffffff');
+          S.rr(c, -9, -50, 18, 8, 1, '#7fd0e8');
+          S.poly(c, [-15, -54, 0, -64, 15, -54], '#e8574f');
+          S.rr(c, -2.5, -46, 5, 2, 0, '#e8574f');
+          S.line(c, [12, -54, 12, -76], '#9aa5ad', 1);
+          S.poly(c, [12, -76, 24, -72 + Math.sin(t * 3), 12, -68], '#ffd24a');
+          break;
+        }
+        case 'logs': {
+          for (const [x, y, w, r] of [[-30, -4, 58, 0.15], [-10, 6, 46, -0.3]] as const) {
+            c.save();
+            c.translate(x + w / 2, y);
+            c.rotate(r * l.flip);
+            S.ell(c, 0, 4, w / 2 + 2, 4, 'rgba(50,40,30,0.2)');
+            S.rr(c, -w / 2, -5, w, 10, 5, '#a08466');
+            S.line(c, [-w / 2 + 6, -1, w / 2 - 8, -2], 'rgba(90,70,50,0.5)', 1);
+            S.ell(c, w / 2 - 2, 0, 3.5, 5, '#c9b08c');
+            S.ell(c, w / 2 - 2, 0, 1.6, 2.4, '#a08466');
+            c.restore();
+          }
+          break;
+        }
+        case 'boulders':
+          for (const [x, y, sc] of [[-22, 0, 3.2], [14, 6, 2.4], [2, -14, 2]] as const) this.at(x, y, sc, () => S.rock(c));
+          break;
+        case 'fence': {
+          for (let x = -70; x <= 70; x += 14) {
+            const y = Math.sin(x * 0.04) * 6;
+            S.rr(c, x - 1.6, y - 16, 3.2, 16, 1, '#9b7b55');
+          }
+          c.beginPath();
+          for (let x = -70; x <= 70; x += 7) {
+            const y = Math.sin(x * 0.04) * 6 - 11 + Math.sin(x * 0.45) * 1.2;
+            if (x === -70) c.moveTo(x, y); else c.lineTo(x, y);
+          }
+          c.strokeStyle = '#d8c39c';
+          c.lineWidth = 1.2;
+          c.stroke();
+          break;
+        }
+        case 'surf': {
+          const cols = ['#ff6b6b', '#4fc3f7', '#ffd24a'];
+          cols.forEach((col, k) => {
+            c.save();
+            c.translate(-16 + k * 16, 0);
+            c.rotate((k - 1) * 0.18);
+            S.ell(c, 0, 1, 7, 2.4, 'rgba(50,40,30,0.2)');
+            c.beginPath();
+            c.ellipse(0, -18, 6, 20, 0, 0, TAU);
+            c.fillStyle = col;
+            c.fill();
+            S.line(c, [0, -36, 0, 0], 'rgba(255,255,255,0.8)', 1.2);
+            c.restore();
+          });
+          break;
+        }
+        case 'pier':
+          this.at(0, 0, 1.8, () => S.pier(c, 90), l.flip);
+          break;
+        case 'pool': {
+          c.beginPath();
+          c.ellipse(0, 0, 34, 16, 0, 0, TAU);
+          c.fillStyle = '#5ccfd6';
+          c.fill();
+          c.strokeStyle = 'rgba(255,255,255,0.6)';
+          c.lineWidth = 1.5;
+          c.stroke();
+          for (const [x, y, sc] of [[-34, 2, 1.4], [30, -4, 1.2], [6, 14, 1], [-10, -16, 0.9]] as const) this.at(x, y, sc, () => S.rock(c));
+          this.at(8, 2, 0.6, () => S.starfish(c, t));
+          break;
+        }
+        case 'wreck': {
+          c.globalAlpha = 0.85;
+          c.save();
+          c.rotate(-0.35 * l.flip);
+          S.poly(c, [-56, -6, 46, -10, 58, 2, 40, 14, -50, 12], '#6b4a32');
+          S.poly(c, [-50, -2, 40, -6, 48, 2, 36, 8, -46, 8], '#8a6446');
+          for (let x = -40; x < 40; x += 10) S.line(c, [x, -4, x + 2, 8], 'rgba(60,40,25,0.6)', 1);
+          S.line(c, [-6, 0, 10, -44], '#5a3d28', 3);
+          S.poly(c, [8, -40, 26, -30, 6, -20], 'rgba(240,235,220,0.8)');
+          c.restore();
+          c.globalAlpha = 1;
+          c.beginPath();
+          c.ellipse(0, 4, 62, 20, -0.35 * l.flip, 0, TAU);
+          c.strokeStyle = `rgba(255,255,255,${0.25 + 0.15 * Math.sin(t * 2)})`;
+          c.lineWidth = 1.4;
+          c.stroke();
+          break;
+        }
+        case 'buoy': {
+          const bob = Math.sin(t * 2) * 1.5;
+          c.beginPath();
+          c.ellipse(0, 2, 14 + Math.sin(t * 2) * 2, 5, 0, 0, TAU);
+          c.strokeStyle = 'rgba(255,255,255,0.6)';
+          c.lineWidth = 1.2;
+          c.stroke();
+          S.rr(c, -7, -14 + bob, 14, 14, 6, '#e8574f');
+          S.rr(c, -7, -9 + bob, 14, 4, 0, '#ffffff');
+          S.line(c, [0, -14 + bob, 0, -30 + bob], '#555', 1.2);
+          S.poly(c, [0, -30 + bob, 10, -27 + bob, 0, -24 + bob], '#ffd24a');
+          break;
+        }
+        case 'reef':
+          for (const [x, y, k, sc] of [[-24, 4, 3, 1.8], [0, -6, 4, 2.2], [22, 6, 5, 1.7], [-6, 12, 3, 1.3]] as const) this.at(x, y, sc, () => S.coral(c, k));
+          break;
+      }
     });
   }
 
@@ -1133,7 +1325,11 @@ export class Scene {
       for (let col = sc0; col <= sc1; col++) {
         const id = row * SCOLS + col;
         const done = this.s.done.includes(id);
-        const text = done ? `${sectorName(id)} ✓` : `${sectorName(id)} · ${Math.floor(this.f.sectorClean(id) * 100)}%`;
+        const th = theme(id);
+        const status = done ? '✓' : `${Math.floor(this.f.sectorClean(id) * 100)}%`;
+        let text = `${th.icon} ${th.name} · ${status}`;
+        const room = this.toScreen((col + 1) * SECTOR, 0).x - this.toScreen(Math.max(col * SECTOR, vx0), 0).x;
+        if (c.measureText(text).width + 30 > room) text = `${th.icon} ${sectorName(id)} · ${status}`;
         const w = c.measureText(text).width + 14;
         // pin the tag to the sector's top-left corner, sliding it along while the corner is off screen
         const corner = this.toScreen(Math.max(col * SECTOR, vx0), Math.max(row * SECTOR, vy0));

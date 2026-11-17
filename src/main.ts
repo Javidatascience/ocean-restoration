@@ -3,7 +3,7 @@ import { POWERS, TOOLS, TREASURES } from './core/content.ts';
 import { fmt } from './core/format.ts';
 import * as sim from './core/sim.ts';
 import { load, newState, save as saveState, wipe, type GameState } from './core/state.ts';
-import { BURIED, LITTER, LITTER_TIER, SECTOR, sectorCol, sectorName, sectorRow } from './core/world.ts';
+import { BURIED, LITTER, LITTER_TIER, theme, SECTOR, sectorCol, sectorName, sectorRow } from './core/world.ts';
 import { Scene } from './scene/scene.ts';
 import { UI } from './ui/ui.ts';
 
@@ -36,7 +36,7 @@ function handle(events: sim.GameEvent[], quiet = false): void {
         scene.sectorFx(e.id);
         sfx.unlock();
         navigator.vibrate?.([12, 40, 12]);
-        ui.toast(`Sector ${sectorName(e.id)} is clean!`, `The last specks are swept away. Bonus: ${fmt(e.bonus)} coins.`, '✨');
+        ui.toast(`${theme(e.id).name} is clean!`, `Sector ${sectorName(e.id)} is spotless. Bonus: ${fmt(e.bonus)} coins, and every patch now pays 3% more.`, theme(e.id).icon);
         const p = scene.playerPos();
         scene.popup(p.x, p.y - 30, '+' + fmt(e.bonus), '#ffd24a', 22);
       }
@@ -80,10 +80,6 @@ scene.digAt = (x, y, reach, extra) => {
     save();
   }
   return res;
-};
-scene.onStreak = (level) => {
-  sfx.streak(level);
-  if (level === 4 || level === 8) navigator.vibrate?.(12);
 };
 scene.onPower = (id) => {
   sfx.power();

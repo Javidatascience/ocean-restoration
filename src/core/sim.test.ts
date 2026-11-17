@@ -122,11 +122,8 @@ describe('helpers and offline', () => {
   });
 });
 
-describe('streaks, power-ups and treasure', () => {
-  it('a streak multiplies what each patch pays, up to x3', () => {
-    expect(sim.streakMult(0)).toBe(1);
-    expect(sim.streakMult(4)).toBe(2);
-    expect(sim.streakMult(20)).toBe(3);
+describe('power-ups and treasure', () => {
+  it('Golden Hour multiplies what each patch pays', () => {
     const s = newState(0);
     const f = new sim.Field(s);
     const p = centre(START_SECTOR);

@@ -13,12 +13,14 @@ coins buy bigger tools, and as your tool grows the camera pulls back so you see 
 - **Sectors**: the coast is a 10×20 grid (200 sectors), all open from the start and marked with dotted lines and a
   little tag showing how clean each one is. Get a sector to 97% and the last specks are swept for you, plus a bonus,
   and every clean sector raises what each patch pays by 3% for good.
+- **Sector themes**: 16 kinds of sector, each with its own name, grime colour, decoration, litter and landmark:
+  Sandcastle Flats, Picnic Cove, Windy Dunes, Rocky Point, Palm Grove, Beach Bar, Driftwood Bay, Lifeguard Post,
+  Tide Pools, Surf Point, Old Pier, Turquoise Shallows, Coral Garden, Kelp Forest, Shipwreck Reef, Fishing Grounds.
 - **The sea**: the top third of the map is water and needs the boat; you switch to it as soon as you drive in.
   Sea patches pay 50% more.
-- **Streak**: keep sweeping dirt without stopping and every patch pays more, up to ×3 (watch the 🔥 meter).
 - **Treasure**: 12 kinds of treasure are buried all over the coast, from shells to a pirate chest. Sweep the dirt
-  away and they glint; pick them up for coins and your collection.
-- **Power-ups**: now and then one appears near you: ⚡ Turbo, 🌀 Mega Brush, 🧲 Super Magnet, 💰 Golden Hour.
+  away and they glint; pick them up for coins and your collection (tap one in Life to read about it).
+- **Power-ups**: now and then one appears near you: ⚡ Turbo, 🌀 Mega Brush, 💰 Golden Hour.
 - **Tools** (10): dustpan → hand broom → rake → push sweeper → sand sifter → buggy → tractor rake → sweeper truck →
   mega sifter → titan cleaner. Plus Quick Boots (speed), Sorting Skills (coins) and the Trash Magnet.
 - **Helpers**: Sand Bots and Sea Drones comb the unfinished sectors nearest to you, lane by lane, also while you are away (50%, up to 8 h).

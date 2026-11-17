@@ -182,7 +182,7 @@ export interface Reach {
 }
 
 /** Sweep a circle: every dirty cell inside it (in an open sector, on terrain you can reach) becomes clean and pays. */
-/** mult scales what the swept patches pay (streaks and Golden Hour); sector bonuses are not affected. */
+/** mult scales what the swept patches pay (Golden Hour); sector bonuses are not affected. */
 export function sweep(s: GameState, f: Field, x: number, y: number, r: number, reach: Reach, mult = 1): SweepOut {
   const out: SweepOut = { cells: 0, coins: 0, events: [] };
   const gx0 = Math.max(0, Math.floor((x - r) / CELL));
@@ -304,13 +304,6 @@ export function digTreasure(s: GameState, f: Field, x: number, y: number, reach:
   return out;
 }
 
-/** Streak: the longer you keep sweeping dirt without a pause, the more each patch pays (up to x3). */
-export function streakMult(level: number): number {
-  return 1 + 0.25 * Math.min(8, level);
-}
-/** Seconds of non-stop sweeping per streak level. */
-export const STREAK_STEP = 4;
-
 function checkProgress(s: GameState, f: Field, events: GameEvent[]): void {
   const p = pct(f);
   for (const a of ANIMALS) {
@@ -377,7 +370,8 @@ export function laneDirty(f: Field, sec: number, y: number, r: number, sea: bool
 export function lanes(sec: number, r: number): number[] {
   const y0 = sectorRow(sec) * SECTOR;
   const out: number[] = [];
-  for (let y = y0 + r * 0.7; y < y0 + SECTOR + r * 0.5; y += r * 1.4) out.push(Math.min(y, y0 + SECTOR - 1));
+  // lanes overlap a lot (step = radius) so nothing is left between passes
+  for (let y = y0 + r * 0.6; y < y0 + SECTOR + r * 0.5; y += r) out.push(Math.min(y, y0 + SECTOR - 1));
   return out;
 }
 
