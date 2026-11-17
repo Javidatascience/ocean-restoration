@@ -1,55 +1,79 @@
-import { SECTOR_START, SECTOR_TRASH, UPGRADES, UNITS, type UpgradeId, type UnitId } from './content.ts';
+import { HELPERS, UPGRADES, type HelperId, type UpgradeId } from './content.ts';
+import { GW, GH, LITTER, SECTOR, START_SECTOR, sectorCol, sectorRow } from './world.ts';
 
 export interface GameState {
-  v: 1;
+  v: 2;
   coins: number;
-  waste: number;
-  rep: number;
-  /** Accumulated restoration points (waste cleaned × ecology multipliers). */
-  restorePts: number;
-  /** Whole restoration percent already paid out as reputation. */
-  repAwardedPct: number;
-  totalWaste: number;
   totalCoins: number;
+  /** Dirt cells swept so far (all time). */
+  cleaned: number;
+  /** Litter pieces picked up (all time). */
+  picked: number;
+  tool: number;
   upgrades: Record<UpgradeId, number>;
-  units: Record<UnitId, number>;
-  recycler: number;
-  research: string[];
-  animals: string[];
-  milestones: number[];
-  beachRewarded: boolean;
-  reefCharted: boolean;
-  /** Index of the current goal in GOALS. */
-  goal: number;
-  /** Open sector ids, trash still lying in each, and the ones swept completely clean. */
+  helpers: Record<HelperId, number>;
+  boat: boolean;
   sectors: number[];
-  sectorLeft: Record<number, number>;
-  sectorsCleared: number[];
+  done: number[];
+  animals: string[];
+  goal: number;
   sound: boolean;
   lastSeen: number;
+  px: number;
+  py: number;
+  /** Dirt grid, 1 bit per cell (1 = dirty), base64. Empty string = all dirty. */
+  dirt: string;
+  /** Litter picked up, 1 bit per piece, base64. */
+  litter: string;
 }
 
 export function newState(now = Date.now()): GameState {
   const upgrades = {} as Record<UpgradeId, number>;
   for (const u of UPGRADES) upgrades[u.id] = 0;
-  const units = {} as Record<UnitId, number>;
-  for (const u of UNITS) units[u.id] = 0;
+  const helpers = {} as Record<HelperId, number>;
+  for (const h of HELPERS) helpers[h.id] = 0;
   return {
-    v: 1, coins: 0, waste: 0, rep: 0, restorePts: 0, repAwardedPct: 0, totalWaste: 0, totalCoins: 0,
-    upgrades, units, recycler: 0, research: [], animals: [], milestones: [],
-    beachRewarded: false, reefCharted: false, goal: 0, sound: true, lastSeen: now,
-    sectors: [...SECTOR_START], sectorLeft: Object.fromEntries(SECTOR_START.map((id) => [id, SECTOR_TRASH])), sectorsCleared: [],
+    v: 2, coins: 0, totalCoins: 0, cleaned: 0, picked: 0, tool: 0, upgrades, helpers, boat: false,
+    sectors: [START_SECTOR], done: [], animals: [], goal: 0, sound: true, lastSeen: now,
+    px: (sectorCol(START_SECTOR) + 0.5) * SECTOR, py: (sectorRow(START_SECTOR) + 0.8) * SECTOR,
+    dirt: '', litter: '',
   };
 }
 
-const KEY = 'ocean-restoration-save-v1';
+// ---- bitsets ---------------------------------------------------------------
+
+export function encodeBits(bits: Uint8Array): string {
+  const bytes = new Uint8Array(Math.ceil(bits.length / 8));
+  for (let i = 0; i < bits.length; i++) if (bits[i]) bytes[i >> 3]! |= 1 << (i & 7);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+export function decodeBits(s: string, n: number, fill: number): Uint8Array {
+  const out = new Uint8Array(n).fill(fill);
+  if (!s) return out;
+  try {
+    const bin = atob(s);
+    for (let i = 0; i < n; i++) out[i] = (bin.charCodeAt(i >> 3) >> (i & 7)) & 1;
+  } catch {
+    /* corrupt: start fresh */
+  }
+  return out;
+}
+
+export const DIRT_CELLS = GW * GH;
+export const LITTER_N = LITTER.length;
+
+// ---- persistence -----------------------------------------------------------
+
+const KEY = 'ocean-restoration-save-v2';
 
 export function save(s: GameState): void {
   s.lastSeen = Date.now();
   try {
     localStorage.setItem(KEY, JSON.stringify(s));
   } catch {
-    /* storage unavailable (private mode): the game still runs, just without saving */
+    /* storage unavailable: the game still runs, just without saving */
   }
 }
 
@@ -58,14 +82,12 @@ export function load(): GameState | null {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as Partial<GameState>;
-    if (data.v !== 1) return null;
-    // Merge over a fresh state so saves from older builds pick up newly added fields.
+    if (data.v !== 2) return null;
     const base = newState();
     return {
       ...base, ...data,
       upgrades: { ...base.upgrades, ...data.upgrades },
-      units: { ...base.units, ...data.units },
-      sectorLeft: data.sectors ? { ...data.sectorLeft } : base.sectorLeft,
+      helpers: { ...base.helpers, ...data.helpers },
     } as GameState;
   } catch {
     return null;

@@ -1,22 +1,22 @@
-// DOM interface: HUD, bottom navigation, the slide-up sheet with its five panels, toasts and modals.
-import {
-  ANIMALS, BOAT_TIERS, BRANCHES, MILESTONES, RECYCLERS, REEF_ROUTE_COST, REGIONS, RESEARCH, SECTOR_COUNT, SWEEP_TIERS, UNITS, UPGRADES,
-  type UnitId, type UpgradeId,
-} from '../core/content.ts';
+// DOM interface: HUD, minimap, bottom navigation, the slide-up sheet, toasts and modals.
+import { ANIMALS, BOAT_COST, HELPERS, TOOLS, UPGRADES, type HelperId, type UpgradeId } from '../core/content.ts';
 import { fmt, fmtDuration } from '../core/format.ts';
 import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
+import { LITTER, SECTOR_N, isSeaSector, sectorAt, sectorName } from '../core/world.ts';
+import type { Scene } from '../scene/scene.ts';
 import { paintIcon } from '../scene/sprites.ts';
 
-export type Tab = 'beach' | 'equipment' | 'automation' | 'research' | 'map' | 'life';
+export type Tab = 'beach' | 'tools' | 'helpers' | 'map' | 'life';
 
 export interface UIActions {
+  buyTool(): boolean;
   buyUpgrade(id: UpgradeId): boolean;
-  buyUnit(id: UnitId, qty: number | 'max'): boolean;
+  buyHelper(id: HelperId): boolean;
+  buyBoat(): boolean;
+  openSector(id: number): boolean;
+  goTo(id: number): void;
   claimGoal(): number;
-  buyRecycler(): boolean;
-  buyResearch(id: string): boolean;
-  chartReef(): boolean;
   toggleSound(): void;
   reset(): void;
   denied(): void;
@@ -24,18 +24,17 @@ export interface UIActions {
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
-const TITLES: Record<Tab, string> = {
-  beach: '', equipment: 'Equipment', automation: 'Automation', research: 'Research', map: 'Ocean Map', life: 'Marine Life',
-};
+const TITLES: Record<Tab, string> = { beach: '', tools: 'Tools', helpers: 'Helpers', map: 'Coast Map', life: 'Marine Life' };
+const TOOL_ICON = ['🧹', '🧹', '🪮', '🛞', '🚜', '🏎️', '🚜', '🚛', '🏭', '🦾'];
 
 export class UI {
   private tab: Tab = 'beach';
-  private selResearch: string | null = null;
   private signature = '';
   private lastHud = '';
-  private qty: number | 'max' = 1;
+  /** Coins per second, smoothed (set by main). */
+  rate = 0;
 
-  constructor(private s: GameState, private act: UIActions) {
+  constructor(private s: GameState, private f: sim.Field, private scene: Scene, private act: UIActions) {
     $('nav').addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>('[data-tab]');
       if (!b) return;
@@ -44,28 +43,11 @@ export class UI {
       act.tabSound();
     });
     $('sheet-close').addEventListener('click', () => this.open('beach'));
-    $('life-chip').addEventListener('click', () => {
-      this.open(this.tab === 'life' ? 'beach' : 'life');
-      act.tabSound();
-    });
     $('sheet-body').addEventListener('click', (e) => this.onSheetClick(e));
-    $('pill-waste').addEventListener('click', () => {
-      const s = this.s;
-      this.toast(
-        'Waste storage',
-        `Collected waste waits here (${fmt(s.waste)} of ${fmt(sim.storageCap(s))}) until the recycler turns it into coins. ` +
-          `Your helpers bring in ${fmt(sim.wastePerMinute(s))}/min and the recycler processes ${fmt(sim.throughput(s) * 60)}/min. ` +
-          `When storage is full, extra waste is lost: build a better recycler or add conveyors.`,
-        '♻️',
-      );
-    });
     $('hint').addEventListener('click', () => {
       if (act.claimGoal() > 0) this.refresh();
     });
-  }
-
-  setState(s: GameState): void {
-    this.s = s;
+    $('minimap').addEventListener('click', () => { this.open('map'); act.tabSound(); });
   }
 
   // ---- navigation --------------------------------------------------------
@@ -77,9 +59,7 @@ export class UI {
     sheet.classList.toggle('open', openNow);
     sheet.setAttribute('aria-hidden', String(!openNow));
     document.body.classList.toggle('sheet-open', openNow);
-    for (const b of Array.from($('nav').querySelectorAll<HTMLElement>('[data-tab]'))) {
-      b.classList.toggle('on', b.dataset.tab === tab || (tab === 'life' && b.dataset.tab === 'beach'));
-    }
+    for (const b of Array.from($('nav').querySelectorAll<HTMLElement>('[data-tab]'))) b.classList.toggle('on', b.dataset.tab === tab);
     if (openNow) {
       $('sheet-title').textContent = TITLES[tab];
       $('sheet-body').scrollTop = 0;
@@ -90,16 +70,13 @@ export class UI {
   private onSheetClick(e: Event): void {
     const el = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
     if (!el) return;
+    if (el.tagName === 'CANVAS') return; // the map has its own handler
     const [kind, id] = (el.dataset.act ?? '').split(':');
     let ok: boolean | null = null;
-    if (kind === 'upgrade') ok = this.act.buyUpgrade(id as UpgradeId);
-    else if (kind === 'unit') ok = this.act.buyUnit(id as UnitId, this.qty);
-    else if (kind === 'qty') { this.qty = id === 'max' ? 'max' : Number(id); this.act.tabSound(); }
-    else if (kind === 'recycler') ok = this.act.buyRecycler();
-    else if (kind === 'research') ok = this.act.buyResearch(id);
-    else if (kind === 'reef') ok = this.act.chartReef();
-    else if (kind === 'rsel') { this.selResearch = id; this.act.tabSound(); }
-    else if (kind === 'life') { this.open('life'); return; }
+    if (kind === 'tool') ok = this.act.buyTool();
+    else if (kind === 'upgrade') ok = this.act.buyUpgrade(id as UpgradeId);
+    else if (kind === 'helper') ok = this.act.buyHelper(id as HelperId);
+    else if (kind === 'boat') ok = this.act.buyBoat();
     else if (kind === 'sound') this.act.toggleSound();
     else if (kind === 'reset') { this.confirmReset(); return; }
     if (ok === false) {
@@ -111,10 +88,7 @@ export class UI {
     }
     const key = el.dataset.act;
     this.render();
-    if (ok) {
-      const again = $('sheet-body').querySelector<HTMLElement>(`[data-act="${key}"]`);
-      again?.closest('.card, .rdetail, .region')?.classList.add('bought');
-    }
+    if (ok) $('sheet-body').querySelector<HTMLElement>(`[data-act="${key}"]`)?.closest('.card')?.classList.add('bought');
   }
 
   // ---- per-frame-ish refresh --------------------------------------------
@@ -122,236 +96,170 @@ export class UI {
   /** Cheap updates, called a few times per second. */
   refresh(): void {
     const s = this.s;
-    const p = sim.pct(s);
-    const cap = sim.storageCap(s);
-    const hud = [
-      fmt(s.coins), fmt(sim.coinsPerMinute(s)), fmt(s.waste), fmt(cap), fmt(sim.wastePerMinute(s)), sim.isBottlenecked(s), Math.floor(s.rep), p.toFixed(1),
-    ].join('|');
+    const here = sectorAt(s.px, s.py);
+    const secPct = here >= 0 ? this.f.sectorClean(here) * 100 : 0;
+    const coast = sim.pct(this.f);
+    const t = sim.tool(s);
+    const hud = [fmt(s.coins), fmt(this.rate), s.tool, here, Math.floor(secPct), coast.toFixed(2)].join('|');
     if (hud !== this.lastHud) {
       this.lastHud = hud;
       $('coins').textContent = fmt(s.coins);
-      $('coins-rate').textContent = `+${fmt(sim.coinsPerMinute(s))}/min`;
-      $('waste').textContent = `${fmt(s.waste)}/${fmt(cap)}`;
-      $('waste-rate').textContent = sim.isBottlenecked(s)
-        ? `FULL · ${fmt(sim.throughput(s) * 60)}/min out`
-        : `in +${fmt(sim.wastePerMinute(s))}/min`;
-      $('rep').textContent = fmt(Math.floor(s.rep));
-      $('pct').textContent = p >= 100 ? '100% ✨' : p.toFixed(1) + '%';
-      $('pct-fill').style.width = p + '%';
-      $('pill-waste').classList.toggle('full', s.waste >= cap * 0.98);
-      $('life-count').textContent = `${s.animals.length}/${ANIMALS.length}`;
+      $('coins-rate').textContent = `+${fmt(this.rate)}/s`;
+      $('tool-ico').textContent = TOOL_ICON[s.tool] ?? '🧹';
+      $('tool').textContent = t.name;
+      $('tool-sub').textContent = `reach ${t.radius} · speed ${Math.round(sim.moveSpeed(s))}`;
+      const done = here >= 0 && s.done.includes(here);
+      $('sector-name').textContent = here >= 0 ? `📍 Sector ${sectorName(here)}${done ? ' · clean ✨' : ''}` : '';
+      $('sector-pct').textContent = `${Math.floor(secPct)}%`;
+      $('sector-fill').style.width = secPct + '%';
+      $('pct').textContent = `🌊 Coast ${coast < 10 ? coast.toFixed(2) : coast.toFixed(1)}%`;
     }
+    this.scene.drawMap($<HTMLCanvasElement>('minimap'));
     this.hint();
     this.badges();
     if (this.tab === 'beach') return;
-    // Re-render when something structural changed (an unlock), otherwise just toggle affordability.
     const sig = this.sig();
     if (sig !== this.signature) this.render();
     else {
-      for (const b of Array.from($('sheet-body').querySelectorAll<HTMLElement>('[data-cost]'))) {
-        const have = b.dataset.cur === 'rep' ? s.rep : s.coins;
-        b.classList.toggle('cant', have < Number(b.dataset.cost));
+      for (const b of Array.from($('sheet-body').querySelectorAll<HTMLElement>('[data-cost]'))) b.classList.toggle('cant', s.coins < Number(b.dataset.cost));
+      if (this.tab === 'map') {
+        const cv = $('sheet-body').querySelector<HTMLCanvasElement>('canvas.bigmap');
+        if (cv) this.scene.drawMap(cv, true);
       }
-      const live = $('sheet-body').querySelector<HTMLElement>('[data-live="rep"]');
-      if (live) live.textContent = fmt(Math.floor(s.rep));
     }
   }
 
   private sig(): string {
     const s = this.s;
-    const p = sim.pct(s);
-    return [
-      this.tab,
-      UPGRADES.map((u) => (p >= u.unlockAt ? 1 : 0)).join(''),
-      UNITS.map((u) => (p >= u.unlockAt ? 1 : 0)).join(''),
-      RESEARCH.map((r) => sim.researchState(s, r)[0]).join(''),
-      s.animals.length, s.milestones.length, sim.canChartReef(s) ? 1 : 0, Math.floor(p),
-      this.tab === 'automation' && this.qty === 'max' ? UNITS.map((u) => sim.unitBulk(s, u.id, 'max').n).join(',') : '',
-    ].join('|');
+    return [this.tab, s.tool, UPGRADES.map((u) => s.upgrades[u.id]).join(','), HELPERS.map((h) => s.helpers[h.id]).join(','), s.boat, s.sectors.length, sim.doneCount(s), s.animals.length].join('|');
   }
 
   private hint(): void {
     const s = this.s;
     let text: string;
-    const stuck = sim.isBottlenecked(s) && (s.recycler < RECYCLERS.length - 1 || s.upgrades.conveyor < 40);
-    const goal = sim.goalStatus(s);
+    const goal = sim.goalStatus(s, this.f);
     const claim = !!goal && goal.done;
-    if (s.totalWaste < 4) text = '👆 Touch and drag to walk — you sweep up the trash around you';
+    if (s.cleaned < 40) text = '👆 Drag anywhere to move · sweep the dirt to earn coins';
     else if (goal && claim) text = `🎁 Goal complete — tap to claim ${fmt(goal.def.reward)}`;
-    else if (stuck) text = '📦 Storage is full — upgrade your recycling';
     else if (goal) {
       const count = goal.def.type === 'pct' ? `${goal.cur.toFixed(1)}%` : goal.def.n > 1 ? `${fmt(Math.floor(goal.cur))}/${fmt(goal.def.n)}` : '';
       text = `🎯 ${goal.def.text}${count ? ' · ' + count : ''}`;
-    } else {
-      const next = ANIMALS.find((a) => !s.animals.includes(a.id));
-      text = next ? `Next: ${next.name} returns at ${next.at}%` : s.reefCharted ? '🌊 Your ocean is thriving' : '🗺️ The Coral Reef awaits on the Ocean Map';
-    }
+    } else text = '🌊 Your coast is spotless';
     const el = $('hint');
     if (el.textContent !== text) el.textContent = text;
-    el.classList.toggle('claim', claim && s.totalWaste >= 4);
+    el.classList.toggle('claim', claim && s.cleaned >= 40);
   }
 
   private badges(): void {
     const s = this.s;
     const flags: Record<string, boolean> = {
-      equipment: UPGRADES.some((u) => sim.canBuyUpgrade(s, u.id)) || sim.canBuyRecycler(s),
-      automation: UNITS.some((u) => sim.canBuyUnit(s, u.id)),
-      research: RESEARCH.some((r) => sim.researchState(s, r) === 'ready'),
-      map: sim.canChartReef(s),
+      tools: sim.canBuyTool(s) || UPGRADES.some((u) => sim.canBuyUpgrade(s, u.id)) || sim.canBuyBoat(s),
+      helpers: HELPERS.some((h) => sim.canBuyHelper(s, h.id)),
+      map: Array.from({ length: SECTOR_N }, (_, id) => id).some((id) => sim.sectorBlock(s, id) === null),
     };
-    for (const b of Array.from($('nav').querySelectorAll<HTMLElement>('[data-tab]'))) {
-      b.classList.toggle('badge', !!flags[b.dataset.tab ?? '']);
-    }
+    for (const b of Array.from($('nav').querySelectorAll<HTMLElement>('[data-tab]'))) b.classList.toggle('badge', !!flags[b.dataset.tab ?? '']);
   }
 
-  // ---- sheet rendering ---------------------------------------------------
+  // ---- sheet panels -------------------------------------------------------
 
   render(): void {
-    if (this.tab === 'beach') return;
     const body = $('sheet-body');
     const scroll = body.scrollTop;
-    const html = this.tab === 'equipment' ? this.equipment()
-      : this.tab === 'automation' ? this.automation()
-      : this.tab === 'research' ? this.research()
+    const html = this.tab === 'tools' ? this.tools()
+      : this.tab === 'helpers' ? this.helpers()
       : this.tab === 'map' ? this.map()
       : this.life();
     body.innerHTML = html;
     body.scrollTop = scroll;
     for (const cv of Array.from(body.querySelectorAll<HTMLCanvasElement>('canvas[data-icon]'))) paintIcon(cv, cv.dataset.icon ?? '');
+    const map = body.querySelector<HTMLCanvasElement>('canvas.bigmap');
+    if (map) {
+      this.scene.drawMap(map, true);
+      map.addEventListener('click', (e) => this.onMapClick(map, e));
+    }
     this.signature = this.sig();
   }
 
-  private buyBtn(act: string, cost: number, cur: 'coins' | 'rep' = 'coins', label = ''): string {
-    const have = cur === 'rep' ? this.s.rep : this.s.coins;
-    const ico = cur === 'rep' ? '<span class="pi">⭐</span>' : '<span class="pi coin"></span>';
-    return `<button type="button" class="buy ${have < cost ? 'cant' : ''}" data-act="${act}" data-cost="${cost}" data-cur="${cur}">${label ? `<em>${label}</em>` : ''}<span>${ico}${fmt(cost)}</span></button>`;
-  }
-  private locked(name: string, at: number): string {
-    return `<div class="card locked"><div class="ico">🔒</div><div class="info"><div class="name">${name}</div><div class="desc">Restore the beach to ${at}% to unlock.</div></div></div>`;
+  private buyBtn(act: string, cost: number, label = ''): string {
+    return `<button type="button" class="buy ${this.s.coins < cost ? 'cant' : ''}" data-act="${act}" data-cost="${cost}">${label ? `<em>${label}</em>` : ''}<span><span class="pi coin"></span>${fmt(cost)}</span></button>`;
   }
 
-  private upgradeEffect(id: UpgradeId): string {
+  private tools(): string {
     const s = this.s;
-    const lvl = s.upgrades[id];
-    const def = UPGRADES.find((u) => u.id === id)!;
-    const peek = (f: () => number): [number, number] => {
-      const now = f();
-      s.upgrades[id]++;
-      const next = f();
-      s.upgrades[id]--;
-      return [now, next];
-    };
-    const arrow = (a: string, b: string) => (lvl >= def.max ? a : `${a} <span class="to">→ ${b}</span>`);
-    if (id === 'grabber') { const [a, b] = peek(() => sim.tapPower(s)); return 'Waste per piece ' + arrow(fmt(a), fmt(b)); }
-    if (id === 'bag') { const [a, b] = peek(() => sim.storageCap(s)); return 'Storage ' + arrow(fmt(a), fmt(b)) + ' · waste per piece +10%'; }
-    if (id === 'net') return 'All collection ' + arrow(`+${lvl * 10}%`, `+${(lvl + 1) * 10}%`);
-    if (id === 'sweeper') return arrow(SWEEP_TIERS[lvl]!, SWEEP_TIERS[lvl + 1]!) + ` · reach ${arrow(String(sim.sweepRadius(s)), String(sim.sweepRadius({ ...s, upgrades: { ...s.upgrades, sweeper: lvl + 1 } })))} · +20% waste`;
-    if (id === 'boots') { const [a, b] = peek(() => sim.moveSpeed(s)); return 'Walking speed ' + arrow(fmt(a), fmt(b)); }
-    if (id === 'boat') return arrow(BOAT_TIERS[lvl]!, BOAT_TIERS[lvl + 1]!) + (lvl === 0 ? ' · opens the sea sectors' : ' · faster, wider sweep at sea');
-    const [a, b] = peek(() => sim.throughput(s) * 60);
-    return 'Recycles ' + arrow(fmt(a), fmt(b)) + '/min';
-  }
-
-  private upgradeCard(id: UpgradeId): string {
-    const s = this.s;
-    const d = UPGRADES.find((u) => u.id === id)!;
-    if (!sim.isUnlocked(s, d.unlockAt)) return this.locked(d.name, d.unlockAt);
-    const lvl = s.upgrades[id];
-    const maxed = lvl >= d.max;
-    return `<div class="card"><div class="ico">${d.icon}</div><div class="info"><div class="name">${d.name}<span class="lvl">Lv ${lvl}</span></div><div class="desc">${d.desc}</div><div class="eff">${this.upgradeEffect(id)}</div></div>${maxed ? '<div class="max">MAX</div>' : this.buyBtn('upgrade:' + id, sim.upgradeCost(s, id))}</div>`;
-  }
-
-  private equipment(): string {
-    const s = this.s;
-    const cur = RECYCLERS[s.recycler];
-    const next = RECYCLERS[s.recycler + 1];
-    const recycler = next
-      ? `<div class="card feature"><canvas class="ico" data-icon="recycler:${s.recycler + 1}"></canvas><div class="info"><div class="name">${next.name}<span class="lvl">Tier ${s.recycler + 2}/5</span></div><div class="desc">${next.desc}</div><div class="eff">${fmt(next.throughput * 60)} waste/min base · ${next.value} coins per waste <span class="to">(now ${cur.value})</span></div></div>${this.buyBtn('recycler', next.cost, 'coins', 'Build')}</div>`
-      : `<div class="card feature"><canvas class="ico" data-icon="recycler:${s.recycler}"></canvas><div class="info"><div class="name">${cur.name}<span class="lvl">Tier 5/5</span></div><div class="desc">${cur.desc}</div><div class="eff">${cur.value} coins per waste</div></div><div class="max">MAX</div></div>`;
-    const sectors = `<div class="summary"><b>${s.sectors.length}/${SECTOR_COUNT}</b> sectors open · <b>${s.sectorsCleared.length}</b> swept clean. Tap the fog on the beach to open the next sector (${fmt(sim.sectorCost(s))} coins).</div>`;
-    return `${sectors}<h3>Sweeping &amp; movement</h3>${(['sweeper', 'boots', 'boat', 'grabber', 'bag', 'net'] as UpgradeId[]).map((id) => this.upgradeCard(id)).join('')}
-      <h3>Recycling <small>${cur.name} · ${fmt(sim.throughput(s) * 60)} waste/min · ${fmt(sim.coinValue(s))} coins each</small></h3>${recycler}${this.upgradeCard('conveyor')}`;
-  }
-
-  private automation(): string {
-    const s = this.s;
-    const card = (id: UnitId): string => {
-      const d = UNITS.find((u) => u.id === id)!;
-      if (!sim.isUnlocked(s, d.unlockAt)) return this.locked(d.name, d.unlockAt);
-      const n = s.units[id];
-      const rate = sim.unitRate(s, id) * 60;
-      const bulk = sim.unitBulk(s, id, this.qty);
-      return `<div class="card"><canvas class="ico ${d.group}" data-icon="unit:${id}"></canvas><div class="info"><div class="name">${d.name}<span class="lvl">×${n}</span></div><div class="desc">${d.desc}</div><div class="eff">+${fmt(rate)} waste/min each${n ? ` <span class="to">· ${fmt(rate * n)}/min total</span>` : ''}</div></div>${this.buyBtn('unit:' + id, bulk.cost, 'coins', bulk.n > 1 ? 'Buy ×' + bulk.n : '')}</div>`;
-    };
-    const firstLocked = (group: string): UnitId[] => {
-      const out: UnitId[] = [];
-      let shownLocked = false;
-      for (const u of UNITS.filter((x) => x.group === group)) {
-        if (sim.isUnlocked(s, u.unlockAt)) out.push(u.id);
-        else if (!shownLocked) { out.push(u.id); shownLocked = true; }
-      }
-      return out;
-    };
-    const total = sim.wastePerMinute(s);
-    return `<div class="summary"><b>+${fmt(total)}</b> waste/min from ${sim.totalUnits(s)} helpers · offline they keep working at ${Math.round(sim.offlineEfficiency(s) * 100)}% for up to ${sim.offlineCapSeconds(s) / 3600}h</div>
-      <div class="seg">${([1, 10, 'max'] as const).map((q) => `<button type="button" class="${this.qty === q ? 'on' : ''}" data-act="qty:${q}">${q === 'max' ? 'Max' : '×' + q}</button>`).join('')}</div>
-      <h3>Beach crew</h3>${firstLocked('beach').map(card).join('')}
-      <h3>Ocean fleet</h3>${firstLocked('ocean').map(card).join('')}`;
-  }
-
-  private research(): string {
-    const s = this.s;
-    if (!this.selResearch || sim.has(s, this.selResearch)) {
-      const pick = RESEARCH.find((r) => sim.researchState(s, r) === 'ready') ?? RESEARCH.find((r) => sim.researchState(s, r) === 'short');
-      if (pick && (!this.selResearch || sim.has(s, this.selResearch))) this.selResearch = pick.id;
-    }
-    const sel = RESEARCH.find((r) => r.id === this.selResearch) ?? RESEARCH[0];
-    const st = sim.researchState(s, sel);
-    const branch = BRANCHES.find((b) => b.id === sel.branch)!;
-    const action = st === 'done' ? '<div class="max">DONE</div>'
-      : st === 'locked' ? '<div class="max lock">🔒 Research the one above first</div>'
-      : this.buyBtn('research:' + sel.id, sel.cost, 'rep', 'Research');
-    const detail = `<div class="rdetail" style="--c:${branch.color}"><div class="ico">${sel.icon}</div><div class="info"><div class="name">${sel.name}</div><div class="desc">${sel.desc}</div></div>${action}</div>`;
-    const cols = BRANCHES.map((b) => {
-      const nodes = RESEARCH.filter((r) => r.branch === b.id).map((r) => {
-        const state = sim.researchState(s, r);
-        return `<button type="button" class="node ${state} ${r.id === sel.id ? 'sel' : ''}" data-act="rsel:${r.id}"><span>${state === 'locked' ? '🔒' : r.icon}</span><small>${state === 'done' ? '✓' : r.cost + '⭐'}</small></button>`;
-      }).join('<i class="link"></i>');
-      return `<div class="branch" style="--c:${b.color}"><h4>${b.name}</h4>${nodes}</div>`;
+    const cur = sim.tool(s);
+    const next = sim.nextTool(s);
+    const toolCard = next
+      ? `<div class="card feature"><div class="ico">${TOOL_ICON[s.tool + 1]}</div><div class="info"><div class="name">${next.name}<span class="lvl">Tier ${s.tool + 2}/${TOOLS.length}</span></div><div class="desc">${next.desc}</div><div class="eff">Reach ${cur.radius} <span class="to">→ ${next.radius}</span> · speed ×${cur.speed} <span class="to">→ ×${next.speed}</span></div></div>${this.buyBtn('tool', next.cost, 'Buy')}</div>`
+      : `<div class="card feature"><div class="ico">${TOOL_ICON[s.tool]}</div><div class="info"><div class="name">${cur.name}<span class="lvl">MAX</span></div><div class="desc">${cur.desc}</div></div><div class="max">MAX</div></div>`;
+    const ups = UPGRADES.map((u) => {
+      const lvl = s.upgrades[u.id];
+      const maxed = lvl >= u.max;
+      let eff = '';
+      if (u.id === 'boots') eff = `Speed ${Math.round(lvl * 12)}%${maxed ? '' : ` <span class="to">→ ${Math.round((lvl + 1) * 12)}%</span>`}`;
+      else if (u.id === 'sorting') eff = `Coins +${lvl * 15}%${maxed ? '' : ` <span class="to">→ +${(lvl + 1) * 15}%</span>`}`;
+      else eff = lvl === 0 ? 'Grabs litter from a distance' : `Pull range +${Math.round(sim.magnetRange(s))}`;
+      return `<div class="card"><div class="ico">${u.icon}</div><div class="info"><div class="name">${u.name}<span class="lvl">Lv ${lvl}</span></div><div class="desc">${u.desc}</div><div class="eff">${eff}</div></div>${maxed ? '<div class="max">MAX</div>' : this.buyBtn('upgrade:' + u.id, sim.upgradeCost(s, u.id))}</div>`;
     }).join('');
-    return `<div class="summary">⭐ <b data-live="rep">${fmt(Math.floor(s.rep))}</b> Ocean Reputation · earned as the beach recovers and animals return</div>${detail}<div class="tree">${cols}</div>`;
+    const boat = s.boat
+      ? `<div class="card"><canvas class="ico" data-icon="unit:boat"></canvas><div class="info"><div class="name">Cleanup Boat<span class="lvl">Ready</span></div><div class="desc">Drive into the water and you switch to the boat. Sea sectors pay 50% more.</div></div><div class="max">⛵</div></div>`
+      : `<div class="card feature"><canvas class="ico" data-icon="unit:boat"></canvas><div class="info"><div class="name">Cleanup Boat</div><div class="desc">The whole top of the map is sea. The boat lets you open sea sectors and clean the water.</div><div class="eff">Sea pays 50% more</div></div>${this.buyBtn('boat', BOAT_COST, 'Buy')}</div>`;
+    return `<div class="summary">${TOOL_ICON[s.tool]} <b>${cur.name}</b> · reach ${cur.radius} · speed ${Math.round(sim.moveSpeed(s))} · ${fmt(sim.cellValue(s, sectorAt(s.px, s.py) >= 0 ? sectorAt(s.px, s.py) : 0))} coins per patch here</div>
+      <h3>Next tool</h3>${toolCard}<h3>Upgrades</h3>${ups}<h3>Sea</h3>${boat}`;
+  }
+
+  private helpers(): string {
+    const s = this.s;
+    const total = HELPERS.reduce((a, h) => a + sim.helperRate(s, h.id), 0);
+    const cards = HELPERS.map((h) => {
+      const n = s.helpers[h.id];
+      const icon = h.sea ? 'unit:floater' : 'unit:robot';
+      if (sim.helperLocked(s, h.id)) return `<div class="card locked"><div class="ico">🔒</div><div class="info"><div class="name">${h.name}</div><div class="desc">Buy the boat first.</div></div></div>`;
+      const maxed = n >= h.max;
+      return `<div class="card"><canvas class="ico" data-icon="${icon}"></canvas><div class="info"><div class="name">${h.name}<span class="lvl">×${n}</span></div><div class="desc">${h.desc}</div><div class="eff">~${fmt(sim.sweepRate(sim.helperRadius(s), sim.HELPER_SPEED, 0.7))} patches/s each</div></div>${maxed ? '<div class="max">MAX</div>' : this.buyBtn('helper:' + h.id, sim.helperCost(s, h.id))}</div>`;
+    }).join('');
+    return `<div class="summary">Your helpers sweep <b>~${fmt(total)}</b> patches/s in open sectors that are not clean yet. They get bigger brushes when you upgrade your tool, and keep working while you are away (50% speed, up to ${sim.OFFLINE_CAP / 3600} h).</div>${cards}`;
   }
 
   private map(): string {
     const s = this.s;
-    const p = sim.pct(s);
-    const check = (ok: boolean, text: string) => `<li class="${ok ? 'ok' : ''}">${ok ? '✓' : '○'} ${text}</li>`;
-    const cards = REGIONS.map((r, i) => {
-      if (r.id === 'beach') {
-        return `<div class="region here"><div class="rico">${r.icon}</div><div class="info"><div class="name">${r.name}<span class="lvl">You are here</span></div><div class="desc">${r.features}</div><div class="bar"><div class="fill" style="width:${p}%"></div></div><div class="eff">${p.toFixed(1)}% restored${s.beachRewarded ? ' · 🐚 Golden Conch: coins +50%' : ''}</div></div></div>`;
-      }
-      if (r.id === 'reef') {
-        if (s.reefCharted) {
-          return `<div class="region charted"><div class="rico">${r.icon}</div><div class="info"><div class="name">${r.name}<span class="lvl">Route charted</span></div><div class="desc">${r.features}</div><div class="eff">The expedition sets sail in a future update. Visitors already love the idea: coins +25%.</div></div></div>`;
-        }
-        return `<div class="region next"><div class="rico">${r.icon}</div><div class="info"><div class="name">${r.name}</div><div class="desc">${r.teaser}</div><ul class="req">${check(p >= 100, 'Tropical Beach 100% restored')}${check(sim.has(s, 'e5'), 'Ocean Ambassador research')}${check(s.rep >= REEF_ROUTE_COST, `${REEF_ROUTE_COST} ⭐ Ocean Reputation`)}</ul></div>${sim.canChartReef(s) ? this.buyBtn('reef', REEF_ROUTE_COST, 'rep', 'Chart route') : '<div class="max lock">🔒</div>'}</div>`;
-      }
-      return `<div class="region far"><div class="rico">🔒</div><div class="info"><div class="name">${r.name}</div><div class="desc">${r.teaser}</div><div class="eff">${i === 2 ? 'Restore the Coral Reef first.' : 'Somewhere beyond the horizon…'}</div></div></div>`;
-    }).join('<i class="route"></i>');
-    return `${cards}
-      <h3>More</h3>
-      <div class="rows"><button type="button" class="row" data-act="life">🐢 Marine life <b>${s.animals.length}/${ANIMALS.length}</b></button>
-      <button type="button" class="row" data-act="sound">${s.sound ? '🔊 Sound on' : '🔇 Sound off'}</button>
-      <button type="button" class="row danger" data-act="reset">Start over</button></div>`;
+    return `<div class="mapwrap"><canvas class="bigmap" data-act="map"></canvas></div>
+      <p class="maphelp">Tap a sector with a gold frame to open it, or an open one to walk there.</p>
+      <div class="rows">
+        <div class="row">🧭 Sectors open <b>${s.sectors.length}/${SECTOR_N}</b></div>
+        <div class="row">✨ Sectors clean <b>${sim.doneCount(s)}</b></div>
+        <div class="row">🧴 Litter picked up <b>${s.picked}/${LITTER.length}</b></div>
+        <button type="button" class="row" data-act="sound">${s.sound ? '🔊 Sound on' : '🔇 Sound off'}</button>
+        <button type="button" class="row danger" data-act="reset">Start over</button>
+      </div>`;
+  }
+
+  private onMapClick(cv: HTMLCanvasElement, e: MouseEvent): void {
+    const b = cv.getBoundingClientRect();
+    const id = this.scene.mapSector(cv, e.clientX - b.left, e.clientY - b.top);
+    if (id < 0) return;
+    if (this.s.sectors.includes(id)) {
+      this.act.goTo(id);
+      this.open('beach');
+      return;
+    }
+    const why = sim.sectorBlock(this.s, id);
+    if (why === null) {
+      if (this.act.openSector(id)) this.render();
+      return;
+    }
+    this.act.denied();
+    if (why === 'far') this.toast('Too far', 'Open a sector next to your area first.', '🧭');
+    else if (why === 'boat') this.toast('Sea sector', 'Buy the boat in Tools to open the sea.', '⛵');
+    else this.toast(`Sector ${sectorName(id)}`, `Opening it costs ${fmt(sim.sectorCost(id))} coins${isSeaSector(id) ? ' (sea pays 50% more)' : ''}.`, '🧭');
   }
 
   private life(): string {
     const s = this.s;
     const cards = ANIMALS.map((a) => {
       const got = s.animals.includes(a.id);
-      return `<div class="animal ${got ? '' : 'missing'}"><canvas class="ico" data-icon="animal:${a.id}"></canvas><div class="name">${got ? a.name : '???'}</div><div class="desc">${got ? a.desc : `Returns at ${a.at}% restoration`}</div></div>`;
+      return `<div class="animal ${got ? '' : 'missing'}"><canvas class="ico" data-icon="animal:${a.id}"></canvas><div class="name">${got ? a.name : '???'}</div><div class="desc">${got ? a.desc : `Returns when ${a.at}% of the coast is clean`}</div></div>`;
     }).join('');
-    return `<div class="summary"><b>${s.animals.length}/${ANIMALS.length}</b> species have come home. Each one brings ⭐ reputation.</div><div class="animals">${cards}</div>`;
+    return `<div class="summary"><b>${s.animals.length}/${ANIMALS.length}</b> species have come home. Look for them on the clean sand and in clear water.</div><div class="animals">${cards}</div>`;
   }
 
   // ---- toasts & modals ---------------------------------------------------
@@ -366,17 +274,13 @@ export class UI {
     const box = $('toasts');
     box.appendChild(el);
     while (box.children.length > 2) box.firstElementChild?.remove();
-    setTimeout(() => el.classList.add('out'), 3800);
-    setTimeout(() => el.remove(), 4300);
+    setTimeout(() => el.classList.add('out'), 3600);
+    setTimeout(() => el.remove(), 4100);
   }
 
   animalToast(id: string): void {
     const a = ANIMALS.find((x) => x.id === id);
     if (a) this.toast(`${a.name} has returned!`, a.desc, 'animal:' + id);
-  }
-  milestoneToast(pctValue: number): void {
-    const m = MILESTONES.find((x) => x.pct === pctValue);
-    if (m) this.toast(`${m.pct}% · ${m.title}`, m.text, '🌴');
   }
 
   modal(html: string, buttons: { label: string; kind?: string; fn?: () => void }[]): void {
@@ -389,35 +293,33 @@ export class UI {
       if (!b) return;
       m.hidden = true;
       m.innerHTML = '';
-      buttons[Number(b.dataset.i)].fn?.();
+      buttons[Number(b.dataset.i)]!.fn?.();
     };
   }
 
   offlineModal(r: sim.OfflineReport): void {
     const animals = r.events.filter((e) => e.kind === 'animal').map((e) => ANIMALS.find((a) => a.id === (e as { id: string }).id)!);
+    const sectors = r.events.filter((e) => e.kind === 'sector').length;
     const lines = [
-      `<li><span>♻️</span><div><b>${fmt(r.waste)}</b> waste collected</div></li>`,
-      `<li><span class="pi coin"></span><div><b>${fmt(r.coins)}</b> coins generated</div></li>`,
-      `<li><span>🏝️</span><div>Beach restoration <b>+${r.pctGain < 0.1 ? r.pctGain.toFixed(2) : r.pctGain.toFixed(1)}%</b></div></li>`,
+      `<li><span>🤖</span><div><b>${fmt(r.cells)}</b> patches swept</div></li>`,
+      `<li><span class="pi coin"></span><div><b>${fmt(r.coins)}</b> coins earned</div></li>`,
+      sectors ? `<li><span>✨</span><div><b>${sectors}</b> sector${sectors > 1 ? 's' : ''} cleaned</div></li>` : '',
       ...animals.map((a) => `<li><canvas class="mini" data-icon="animal:${a.id}"></canvas><div><b>${a.name}</b> came home</div></li>`),
     ].join('');
-    const note = r.capped
-      ? `<p class="note">Your crew rests after ${Math.round(r.seconds / 3600)} hours away.${sim.has(this.s, 'a3') ? '' : ' Night Crew research lets them work longer.'}</p>`
-      : '';
-    this.modal(`<div class="big">🌅</div><h2>Welcome back!</h2><p>While you were away (${fmtDuration(r.seconds)}):</p><ul class="gains">${lines}</ul>${note}`, [{ label: 'Lovely!' }]);
+    const note = r.capped ? `<p class="note">Your helpers rest after ${Math.round(r.seconds / 3600)} hours away.</p>` : '';
+    this.modal(`<div class="big">🌅</div><h2>Welcome back!</h2><p>While you were away (${fmtDuration(r.seconds)}) your helpers kept sweeping:</p><ul class="gains">${lines}</ul>${note}`, [{ label: 'Lovely!' }]);
   }
 
-  restoredModal(): void {
+  completeModal(): void {
     this.modal(
-      `<div class="big">🏝️</div><h2>Beach restored!</h2><p>From a polluted shore to a thriving paradise — every tap and every helper mattered.</p>
-       <ul class="gains"><li><span>🐚</span><div><b>Golden Conch</b>: coins +50% forever</div></li><li><span>🐋</span><div>The <b>Humpback Whale</b> is back offshore</div></li><li><span>🗺️</span><div>A new destination appears: the <b>Coral Reef</b></div></li></ul>`,
-      [{ label: 'Keep caring for the ocean' }],
+      `<div class="big">🏝️</div><h2>The whole coast is clean!</h2><p>Every grain of sand and every wave, spotless. The whale is back offshore.</p>`,
+      [{ label: 'Enjoy the view' }],
     );
   }
 
   private confirmReset(): void {
-    this.modal('<div class="big">🌊</div><h2>Start over?</h2><p>This erases your beach and all progress on this device.</p>', [
-      { label: 'Keep my beach', kind: 'ghost' },
+    this.modal('<div class="big">🌊</div><h2>Start over?</h2><p>This erases your coast and all progress on this device.</p>', [
+      { label: 'Keep my coast', kind: 'ghost' },
       { label: 'Erase everything', kind: 'danger', fn: () => this.act.reset() },
     ]);
   }

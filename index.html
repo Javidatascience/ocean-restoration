@@ -7,7 +7,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Ocean Restoration" />
-    <meta name="description" content="A cozy idle game: clean a polluted beach and watch the ocean come back to life." />
+    <meta name="description" content="A cozy cleaning game: sweep a huge polluted coast, sector by sector, with bigger and bigger tools." />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <title>Ocean Restoration</title>
@@ -17,20 +17,19 @@
     <div id="app">
       <header id="hud">
         <div class="pills">
-          <div class="pill" id="pill-coins"><span class="pi coin"></span><div><b id="coins">0</b><small id="coins-rate">+0/min</small></div></div>
-          <div class="pill" id="pill-waste"><span class="pi">♻️</span><div><b id="waste">0</b><small id="waste-rate">+0/min</small></div></div>
-          <div class="pill small" id="pill-rep"><span class="pi">⭐</span><div><b id="rep">0</b><small>rep</small></div></div>
+          <div class="pill" id="pill-coins"><span class="pi coin"></span><div><b id="coins">0</b><small id="coins-rate">+0/s</small></div></div>
+          <div class="pill" id="pill-tool"><span class="pi" id="tool-ico">🧹</span><div><b id="tool">Dustpan</b><small id="tool-sub">reach 4</small></div></div>
         </div>
         <div class="restore">
-          <div class="restore-top"><span>🏝️ Tropical Beach</span><b id="pct">0.0%</b></div>
-          <div class="bar"><div class="fill" id="pct-fill"></div><i style="left:25%"></i><i style="left:50%"></i><i style="left:75%"></i></div>
+          <div class="restore-top"><span id="sector-name">📍 Sector</span><span class="coast" id="pct">🌊 Coast 0%</span><b id="sector-pct">0%</b></div>
+          <div class="bar"><div class="fill" id="sector-fill"></div></div>
         </div>
       </header>
 
       <main id="stage">
         <canvas id="scene"></canvas>
+        <canvas id="minimap" aria-label="Map"></canvas>
         <div id="toasts"></div>
-        <button id="life-chip" type="button" aria-label="Marine life collection">🐢 <span id="life-count">0/12</span></button>
         <div id="hint"></div>
         <section id="sheet" aria-hidden="true">
           <div class="sheet-head"><h2 id="sheet-title"></h2><button id="sheet-close" type="button" aria-label="Close">✕</button></div>
@@ -40,10 +39,10 @@
 
       <nav id="nav">
         <button type="button" data-tab="beach" class="on"><span>🏖️</span>Beach</button>
-        <button type="button" data-tab="equipment"><span>🧰</span>Equipment<i></i></button>
-        <button type="button" data-tab="automation"><span>🚤</span>Automation<i></i></button>
-        <button type="button" data-tab="research"><span>🔬</span>Research<i></i></button>
-        <button type="button" data-tab="map"><span>🗺️</span>Ocean Map<i></i></button>
+        <button type="button" data-tab="tools"><span>🧹</span>Tools<i></i></button>
+        <button type="button" data-tab="helpers"><span>🤖</span>Helpers<i></i></button>
+        <button type="button" data-tab="map"><span>🗺️</span>Map<i></i></button>
+        <button type="button" data-tab="life"><span>🐢</span>Life<i></i></button>
       </nav>
 
       <div id="modal" hidden></div>

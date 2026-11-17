@@ -1,184 +1,130 @@
 import { describe, expect, it } from 'vitest';
-import { ANIMALS, RECYCLERS, UNITS, UPGRADES } from './content.ts';
+import { BOAT_COST, TOOLS } from './content.ts';
 import * as sim from './sim.ts';
-import { newState } from './state.ts';
+import { decodeBits, encodeBits, newState } from './state.ts';
+import {
+  CELLS_PER_SECTOR, LITTER, LITTER_TIER, SECTOR, SCOLS, START_SECTOR, isSeaSector, isWater, neighbours, sectorCol, sectorRow,
+} from './world.ts';
 
-describe('economy', () => {
-  it('starts empty and a tap collects waste', () => {
+const LAND = { land: true, sea: false };
+const centre = (id: number) => ({ x: (sectorCol(id) + 0.5) * SECTOR, y: (sectorRow(id) + 0.5) * SECTOR });
+
+describe('world', () => {
+  it('everything starts dirty and only the start sector is open', () => {
     const s = newState(0);
-    expect(sim.autoRate(s)).toBe(0);
-    sim.collect(s, sim.tapPower(s));
-    expect(s.waste).toBe(1);
-    expect(sim.pct(s)).toBeGreaterThan(0);
+    const f = new sim.Field(s);
+    expect(sim.pct(f)).toBe(0);
+    expect(f.left[START_SECTOR]).toBe(CELLS_PER_SECTOR);
+    expect(s.sectors).toEqual([START_SECTOR]);
+    expect(isSeaSector(START_SECTOR)).toBe(false);
+    expect(isWater(centre(0).x, centre(0).y)).toBe(true);
   });
 
-  it('recycles waste into coins, limited by throughput', () => {
-    const s = newState(0);
-    s.waste = 50;
-    const res = sim.advance(s, 10);
-    expect(res.coins).toBeCloseTo(RECYCLERS[0].throughput * 10 * RECYCLERS[0].value);
-    expect(s.waste).toBeCloseTo(50 - RECYCLERS[0].throughput * 10);
-  });
-
-  it('never stores more than the storage capacity', () => {
-    const s = newState(0);
-    sim.collect(s, 1e6);
-    expect(s.waste).toBe(sim.storageCap(s));
-  });
-
-  it('costs grow with every purchase', () => {
-    const s = newState(0);
-    s.coins = 1e9;
-    for (const u of UPGRADES.filter((x) => x.unlockAt === 0)) {
-      const before = sim.upgradeCost(s, u.id);
-      expect(sim.buyUpgrade(s, u.id)).toBe(true);
-      expect(sim.upgradeCost(s, u.id)).toBeGreaterThan(before);
-    }
-    const before = sim.unitCost(s, 'worker');
-    expect(sim.buyUnit(s, 'worker')).toBe(true);
-    expect(sim.unitCost(s, 'worker')).toBeGreaterThan(before);
-    expect(sim.autoRate(s)).toBeCloseTo(UNITS[0].rate * sim.collectMult(s));
-  });
-
-  it('refuses purchases that are locked or unaffordable', () => {
-    const s = newState(0);
-    expect(sim.buyUnit(s, 'worker')).toBe(false);
-    s.coins = 1e12;
-    expect(sim.buyUnit(s, 'robot')).toBe(false); // needs restoration first
-    expect(sim.buyResearch(s, 'c2')).toBe(false); // needs c1 and reputation
+  it('the dirt grid survives a save and load', () => {
+    const bits = new Uint8Array(1000).map((_, i) => (i % 3 === 0 ? 1 : 0));
+    expect(Array.from(decodeBits(encodeBits(bits), 1000, 1))).toEqual(Array.from(bits));
   });
 });
 
-describe('progression', () => {
-  it('restoration reaches exactly 100% at the target and brings every animal home', () => {
+describe('sweeping', () => {
+  it('cleans the cells inside the tool and pays for each', () => {
     const s = newState(0);
-    const events = sim.collect(s, sim.TARGET);
-    expect(sim.pct(s)).toBe(100);
-    expect(s.animals.length).toBe(ANIMALS.length);
-    expect(s.beachRewarded).toBe(true);
-    expect(events.filter((e) => e.kind === 'milestone').length).toBe(4);
-    expect(s.rep).toBeGreaterThan(100);
+    const f = new sim.Field(s);
+    const p = centre(START_SECTOR);
+    const res = sim.sweep(s, f, p.x, p.y, 8, LAND);
+    expect(res.cells).toBeGreaterThan(10);
+    expect(s.coins).toBeCloseTo(res.cells * sim.cellValue(s, START_SECTOR));
+    expect(sim.sweep(s, f, p.x, p.y, 8, LAND).cells).toBe(0); // already clean
   });
 
-  it('research needs its prerequisite', () => {
+  it('does nothing in a locked sector', () => {
     const s = newState(0);
-    s.rep = 100;
-    expect(sim.buyResearch(s, 'a2')).toBe(false);
-    expect(sim.buyResearch(s, 'a1')).toBe(true);
-    expect(sim.buyResearch(s, 'a2')).toBe(true);
+    const f = new sim.Field(s);
+    const p = centre(START_SECTOR - SCOLS);
+    expect(sim.sweep(s, f, p.x, p.y, 20, LAND).cells).toBe(0);
+  });
+
+  it('a nearly clean sector finishes itself and pays a bonus', () => {
+    const s = newState(0);
+    const f = new sim.Field(s);
+    const x0 = sectorCol(START_SECTOR) * SECTOR;
+    const y0 = sectorRow(START_SECTOR) * SECTOR;
+    const events: sim.GameEvent[] = [];
+    for (let y = y0 + 6; y < y0 + SECTOR; y += 14) for (let x = x0 + 6; x < x0 + SECTOR; x += 6) events.push(...sim.sweep(s, f, x, y, 10, LAND).events);
+    expect(f.left[START_SECTOR]).toBe(0);
+    expect(s.done).toContain(START_SECTOR);
+    expect(events.filter((e) => e.kind === 'sector').length).toBe(1);
   });
 });
 
-describe('goals and bulk buying', () => {
-  it('goals are claimed in order and pay their reward once', () => {
+describe('litter', () => {
+  it('small litter is picked up, big litter needs a bigger tool', () => {
     const s = newState(0);
-    expect(sim.claimGoal(s)).toBe(0);
-    sim.collect(s, 10);
-    expect(sim.goalStatus(s)!.done).toBe(true);
-    expect(sim.claimGoal(s)).toBe(15);
-    expect(s.coins).toBe(15);
-    expect(sim.claimGoal(s)).toBe(0);
-    expect(s.goal).toBe(1);
+    s.sectors = Array.from({ length: 200 }, (_, i) => i);
+    const f = new sim.Field(s);
+    const small = LITTER.findIndex((l) => l.size === 0 && !l.water);
+    const big = LITTER.findIndex((l) => l.size === 2 && !l.water);
+    const a = sim.pickLitter(s, f, LITTER[small]!.x, LITTER[small]!.y, LAND);
+    expect(a.picked).toContain(small);
+    const b = sim.pickLitter(s, f, LITTER[big]!.x, LITTER[big]!.y, LAND);
+    expect(b.picked).not.toContain(big);
+    expect(b.tooBig).toContain(big);
+    s.tool = LITTER_TIER[2]!;
+    expect(sim.pickLitter(s, f, LITTER[big]!.x, LITTER[big]!.y, LAND).picked).toContain(big);
   });
+});
 
-  it('buying x10 costs the sum of ten rising prices', () => {
+describe('purchases', () => {
+  it('tools are bought in order and grow the reach', () => {
     const s = newState(0);
-    let sum = 0;
-    const probe = newState(0);
-    for (let i = 0; i < 10; i++) { sum += sim.unitCost(probe, 'worker'); probe.units.worker++; }
-    expect(sim.unitBulk(s, 'worker', 10)).toEqual({ n: 10, cost: sum });
-    s.coins = sum - 1;
-    expect(sim.buyUnit(s, 'worker', 10)).toBe(false);
-    s.coins = sum;
-    expect(sim.buyUnit(s, 'worker', 10)).toBe(true);
-    expect(s.units.worker).toBe(10);
+    expect(sim.buyTool(s)).toBe(false);
+    s.coins = TOOLS[1]!.cost;
+    expect(sim.buyTool(s)).toBe(true);
+    expect(sim.toolRadius(s)).toBe(TOOLS[1]!.radius);
     expect(s.coins).toBe(0);
   });
 
-  it('max buys as many as affordable and never overspends', () => {
+  it('sectors open next to your area; sea sectors need the boat', () => {
     const s = newState(0);
-    s.coins = 100;
-    const b = sim.unitBulk(s, 'worker', 'max');
-    expect(b.n).toBe(3);
-    expect(b.cost).toBeLessThanOrEqual(100);
-    s.coins = 1;
-    expect(sim.unitBulk(s, 'worker', 'max').n).toBe(1);
-    expect(sim.buyUnit(s, 'worker', 'max')).toBe(false);
+    const f = new sim.Field(s);
+    s.coins = 1e12;
+    expect(sim.sectorBlock(s, 0)).toBe('far');
+    const up = START_SECTOR - SCOLS;
+    expect(neighbours(START_SECTOR)).toContain(up);
+    expect(sim.openSector(s, f, up)).toBe(true);
+    expect(f.open[up]).toBe(1);
+    // walk the column up to the first sea row
+    let id = up;
+    while (!isSeaSector(id - SCOLS)) { id -= SCOLS; expect(sim.openSector(s, f, id)).toBe(true); }
+    expect(sim.sectorBlock(s, id - SCOLS)).toBe('boat');
+    expect(sim.buyBoat(s)).toBe(true);
+    expect(s.coins).toBe(1e12 - BOAT_COST - [...s.sectors].slice(1).reduce((a, x) => a + sim.sectorCost(x), 0));
+    expect(sim.openSector(s, f, id - SCOLS)).toBe(true);
+  });
+
+  it('further sectors pay more per patch, and cost more to open', () => {
+    expect(sim.cellBase(START_SECTOR - SCOLS)).toBeGreaterThan(sim.cellBase(START_SECTOR));
+    expect(sim.sectorCost(0)).toBeGreaterThan(sim.sectorCost(START_SECTOR - SCOLS));
   });
 });
 
-describe('offline progress', () => {
-  it('uses real elapsed time, at reduced efficiency, up to the cap', () => {
+describe('helpers and offline', () => {
+  it('helpers clean while you are away, up to the cap', () => {
     const s = newState(0);
-    s.units.worker = 10;
-    const rate = sim.autoRate(s);
-    const hour = sim.applyOffline(s, 3600);
-    expect(hour.capped).toBe(false);
-    expect(hour.waste).toBeCloseTo(rate * 3600 * 0.5);
-    expect(hour.coins).toBeGreaterThan(0);
-    expect(hour.pctGain).toBeGreaterThan(0);
-
-    const long = sim.applyOffline(newStateWithWorkers(), 100 * 3600);
-    expect(long.capped).toBe(true);
-    expect(long.seconds).toBe(8 * 3600);
+    const f = new sim.Field(s);
+    s.helpers.bot = 3;
+    const r = sim.applyOffline(s, f, 600, () => 0.37);
+    expect(r.cells).toBeGreaterThan(0);
+    expect(r.coins).toBeGreaterThan(0);
+    expect(sim.applyOffline(s, f, 100 * 3600).capped).toBe(true);
   });
 
-  it('Night Crew extends the cap and efficiency', () => {
-    const s = newStateWithWorkers();
-    s.research.push('a3');
-    expect(sim.offlineCapSeconds(s)).toBe(16 * 3600);
-    expect(sim.offlineEfficiency(s)).toBe(1);
-  });
-});
-
-function newStateWithWorkers() {
-  const s = newState(0);
-  s.units.worker = 10;
-  return s;
-}
-
-describe('sectors and sweeping', () => {
-  it('starts with the two station sectors open and a pile of trash in each', () => {
+  it('goals are claimed in order', () => {
     const s = newState(0);
-    expect(s.sectors).toEqual([9, 10]);
-    expect(s.sectorLeft[9]).toBe(12);
-  });
-
-  it('opening a sector costs coins, must touch an open one, and sea sectors also need a boat', () => {
-    const s = newState(0);
-    expect(sim.sectorBlock(s, 6, false)).toBe('coins');
-    s.coins = 1e6;
-    expect(sim.sectorBlock(s, 0, false)).toBe('far');
-    const cost = sim.sectorCost(s);
-    expect(sim.openSector(s, 6, false)).toBe(true);
-    expect(s.coins).toBe(1e6 - cost);
-    expect(sim.sectorCost(s)).toBeGreaterThan(cost);
-    expect(sim.sectorBlock(s, 3, true)).toBe('boat');
-    expect(sim.openSector(s, 3, true)).toBe(false);
-    s.upgrades.boat = 1;
-    expect(sim.openSector(s, 3, true)).toBe(true);
-  });
-
-  it('sweeping the last piece of a sector pays a one-off bonus', () => {
-    const s = newState(0);
-    for (let i = 0; i < 11; i++) expect(sim.sweptItem(s, 9, false).reward).toBe(0);
-    const last = sim.sweptItem(s, 9, false);
-    expect(last.reward).toBeGreaterThan(0);
-    expect(s.sectorsCleared).toEqual([9]);
-    expect(sim.sweptItem(s, 9, false).reward).toBe(0);
-    expect(sim.sweptItem(s, 10, true).reward).toBe(0); // tide trash never counts
-    expect(s.sectorLeft[10]).toBe(12);
-  });
-
-  it('better tools and boots reach further and move faster; the boat is quicker on water', () => {
-    const s = newState(0);
-    const r0 = sim.sweepRadius(s);
-    const v0 = sim.moveSpeed(s);
-    s.upgrades.sweeper = 2;
-    s.upgrades.boots = 2;
-    expect(sim.sweepRadius(s)).toBeGreaterThan(r0);
-    expect(sim.moveSpeed(s)).toBeGreaterThan(v0);
-    s.upgrades.boat = 3;
-    expect(sim.moveSpeed(s, true)).toBeGreaterThan(sim.moveSpeed(s));
+    const f = new sim.Field(s);
+    expect(sim.claimGoal(s, f)).toBe(0);
+    s.cleaned = 300;
+    expect(sim.claimGoal(s, f)).toBeGreaterThan(0);
+    expect(s.goal).toBe(1);
   });
 });

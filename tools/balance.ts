@@ -1,74 +1,99 @@
-// Greedy bot that plays the economy and prints a timeline. Run: npm run balance
-// Used to check there are no progression walls and that a full restoration takes a sensible time.
-import { RECYCLERS, RESEARCH, UNITS, UPGRADES } from '../src/core/content.ts';
+// Bot that plays the real rules on the real dirt grid and prints a timeline. Run: npm run balance
+// It sweeps sectors in lanes, picks up litter, buys tools / upgrades / helpers / sectors greedily.
+import { HELPERS, TOOLS, UPGRADES } from '../src/core/content.ts';
 import * as sim from '../src/core/sim.ts';
 import { newState } from '../src/core/state.ts';
+import { SECTOR, SECTOR_N, SCOLS, isSeaSector } from '../src/core/world.ts';
 
-if (process.env.NOLOCK) { for (const u of UNITS) u.unlockAt = 0; for (const u of UPGRADES) u.unlockAt = 0; }
+const s = newState(0);
+const f = new sim.Field(s);
+const dt = 0.25;
+let t = 0;
+let target = -1;
+let lane = 0;
+let dir = 1;
+let x = s.px;
+let y = s.py;
+let lastBuy = 0;
+let worstGap = 0;
+const marks = [1, 5, 10, 25, 50, 75, 90, 100];
+const log = (msg: string) => console.log(`${(t / 60).toFixed(1).padStart(6)} min  ${sim.pct(f).toFixed(1).padStart(5)}%  ${msg}`);
 
-function run(label: string, activeFraction: number): void {
-  const first: Record<string, boolean> = {};
-  const s = newState(0);
-  const dt = 1;
-  let t = 0;
-  let lastBuy = 0;
-  let worstGap = 0;
-  let worstGapAt = 0;
-  const marks = [10, 25, 50, 75, 100];
-  console.log(`\n== ${label} ==`);
-  while (sim.pct(s) < 100 && t < 60 * 3600) {
-    t += dt;
-    sim.advance(s, dt);
-    // Tapping: limited by how fast trash drifts in.
-    const active = (t % 600) < 600 * activeFraction || t < 180;
-    if (active) {
-      const spawn = sim.has(s, 'c2') ? 3.3 : 1.66;
-      const taps = Math.min(1.5, spawn);
-      const perTap = sim.tapPower(s) * 1.3 * (1 + 0.5 * s.upgrades.sweeper) + sim.tapBonus(s);
-      sim.collect(s, taps * perTap * dt);
+function pickTarget(): void {
+  const open = s.sectors.filter((id) => !s.done.includes(id));
+  open.sort((a, b) => sim.cellBase(b) - sim.cellBase(a));
+  const next = open[0] ?? -1;
+  if (next !== target) {
+    if (next >= 0) {
+      const nx = (next % SCOLS) * SECTOR;
+      const ny = Math.floor(next / SCOLS) * SECTOR;
+      t += Math.hypot(nx - x, ny - y) / sim.moveSpeed(s); // walk there
+      x = nx; y = ny;
     }
-    // Research: cheapest available.
-    for (const r of [...RESEARCH].sort((a, b) => a.cost - b.cost)) sim.buyResearch(s, r.id);
-    // Purchases: best "production per coin" among the affordable, else cheapest.
-    let bought = true;
-    while (bought) {
-      bought = false;
-      const bottleneck = sim.autoRate(s) > sim.throughput(s) * 0.8 || s.waste > sim.storageCap(s) * 0.9;
-      if (sim.canBuyRecycler(s)) bought = sim.buyRecycler(s);
-      else if (bottleneck && sim.canBuyUpgrade(s, 'conveyor')) bought = sim.buyUpgrade(s, 'conveyor');
-      if (bought) { lastBuy = t; continue; }
-      const next = RECYCLERS[s.recycler + 1];
-      // Save up for the next recycler when it's close.
-      if (next && bottleneck && sim.upgradeCost(s, 'conveyor') > next.cost * 0.3) break;
-      const units = UNITS.filter((u) => sim.canBuyUnit(s, u.id))
-        .sort((a, b) => sim.unitCost(s, a.id) / sim.unitRate(s, a.id) - sim.unitCost(s, b.id) / sim.unitRate(s, b.id));
-      if (units[0]) {
-        bought = sim.buyUnit(s, units[0].id);
-        if (bought && !first[units[0].id]) {
-          first[units[0].id] = true;
-          console.log(`   first ${units[0].id} at ${(t / 60).toFixed(1)} min, ${sim.pct(s).toFixed(1)}%, total waste ${s.totalWaste.toExponential(2)}`);
-        }
-      }
-      else {
-        const ups = UPGRADES.filter((u) => u.id !== 'conveyor' && sim.canBuyUpgrade(s, u.id))
-          .sort((a, b) => sim.upgradeCost(s, a.id) - sim.upgradeCost(s, b.id));
-        if (ups[0] && sim.upgradeCost(s, ups[0].id) < s.coins * 0.5) bought = sim.buyUpgrade(s, ups[0].id);
-      }
-      if (bought) lastBuy = t;
-    }
-    if (t - lastBuy > worstGap) { worstGap = t - lastBuy; worstGapAt = t; }
-    while (marks.length && sim.pct(s) >= marks[0]!) {
-      const m = marks.shift()!;
-      console.log(
-        `${String(m).padStart(3)}% at ${(t / 60).toFixed(1).padStart(7)} min | auto ${sim.autoRate(s).toFixed(1)}/s thr ${sim.throughput(s).toFixed(0)}/s ` +
-        `tap ${sim.tapPower(s).toFixed(0)} | coins ${s.coins.toFixed(0)} rep ${s.rep.toFixed(0)} research ${s.research.length} | ` +
-        `units ${UNITS.map((u) => s.units[u.id]).join('/')} recycler ${s.recycler}`,
-      );
-    }
+    target = next;
+    lane = 0;
+    dir = 1;
   }
-  console.log(`longest wait between purchases: ${(worstGap / 60).toFixed(1)} min (at ${(worstGapAt / 60).toFixed(0)} min)`);
 }
 
-run('active player (always tapping)', 1);
-run('casual (tapping 20% of the time)', 0.2);
-run('idle (taps only the first 3 minutes)', 0);
+function buy(): void {
+  let again = true;
+  while (again) {
+    again = false;
+    if (sim.buyTool(s)) { log(`tool → ${TOOLS[s.tool]!.name}`); again = true; continue; }
+    const nextToolCost = sim.nextTool(s)?.cost ?? Infinity;
+    if (!s.boat && s.tool >= 3 && sim.buyBoat(s)) { log('boat'); again = true; continue; }
+    for (const u of UPGRADES) {
+      if (sim.upgradeCost(s, u.id) < Math.min(s.coins * 0.3, nextToolCost * 0.25) && sim.buyUpgrade(s, u.id)) again = true;
+    }
+    for (const h of HELPERS) {
+      if (sim.helperCost(s, h.id) < Math.min(s.coins * 0.2, nextToolCost * 0.15) && sim.buyHelper(s, h.id)) again = true;
+    }
+    const undone = s.sectors.filter((id) => !s.done.includes(id)).length;
+    if (undone < 2) {
+      const options = Array.from({ length: SECTOR_N }, (_, id) => id).filter((id) => sim.sectorBlock(s, id) === null);
+      options.sort((a, b) => sim.sectorCost(a) - sim.sectorCost(b));
+      if (options[0] !== undefined && sim.openSector(s, f, options[0])) again = true;
+    }
+    if (again) lastBuy = t;
+  }
+}
+
+while (sim.pct(f) < 99.9 && t < 12 * 3600) {
+  pickTarget();
+  if (target >= 0) {
+    // Lane sweep inside the target sector.
+    const r = sim.toolRadius(s);
+    const x0 = (target % SCOLS) * SECTOR;
+    const y0 = Math.floor(target / SCOLS) * SECTOR;
+    const step = sim.moveSpeed(s, isSeaSector(target)) * dt;
+    x += dir * step;
+    if (x > x0 + SECTOR || x < x0) {
+      dir = -dir;
+      x = Math.max(x0, Math.min(x0 + SECTOR, x));
+      lane++;
+      if (lane * r * 1.6 > SECTOR + r) lane = 0;
+    }
+    y = y0 + Math.min(SECTOR, lane * r * 1.6 + r * 0.5);
+    const reach = { land: true, sea: s.boat };
+    sim.sweep(s, f, x, y, r, reach);
+    sim.pickLitter(s, f, x, y, reach);
+  }
+  // Helpers, as a budget of cells per tick.
+  for (const h of HELPERS) {
+    let budget = sim.helperRate(s, h.id) * dt * 0.8;
+    let misses = 0;
+    while (budget > 0 && misses < 5) {
+      const p = sim.helperTarget(s, f, h.sea);
+      if (!p) break;
+      const res = sim.sweep(s, f, p.x, p.y, sim.helperRadius(s), { land: !h.sea, sea: h.sea });
+      if (!res.cells) { misses++; continue; }
+      budget -= res.cells;
+    }
+  }
+  buy();
+  if (t - lastBuy > worstGap) worstGap = t - lastBuy;
+  while (marks.length && sim.pct(f) >= marks[0]!) log(`=== ${marks.shift()}% · sectors ${s.sectors.length} done ${sim.doneCount(s)} · helpers ${s.helpers.bot}/${s.helpers.drone} · ups ${UPGRADES.map((u) => s.upgrades[u.id]).join('/')}`);
+  t += dt;
+}
+log(`end · longest wait between purchases ${(worstGap / 60).toFixed(1)} min · coins ${s.coins.toExponential(2)}`);

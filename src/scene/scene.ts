@@ -1,31 +1,23 @@
-// The living beach: an isometric-flavoured scene drawn on a 2D canvas. It only reads the game state;
-// taps are reported back through onCollect so the rules stay in core/sim.
+// The coast seen from above. A camera follows the player; the dirt is a fine grid painted into an offscreen
+// canvas, one pixel per cell, so sweeping it away reveals the clean sand and water underneath.
+import { ANIMALS, TOOLS } from '../core/content.ts';
 import * as sim from '../core/sim.ts';
-import { has, pct, storageCap } from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
-import { SECTOR_COLS, SECTOR_COUNT, SECTOR_ROWS, type UnitId } from '../core/content.ts';
+import {
+  CELL, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SCOLS, SROWS, WORLD_H, WORLD_W,
+  isSeaSector, isWater, isWaterCell, neighbours, sectorAt, shoreY,
+} from '../core/world.ts';
 import * as S from './sprites.ts';
 
 type C = CanvasRenderingContext2D;
 const TAU = Math.PI * 2;
 
-/** Value multiplier per trash kind (see sprites.trash). */
-export const KIND_VALUE = [1, 1, 1.5, 1, 4, 8, 3];
-
-interface Trash { x: number; y: number; kind: number; water: boolean; age: number; rot: number; ph: number; sector: number; tide: boolean }
-interface Fly { x0: number; y0: number; x1: number; y1: number; t: number; kind: number }
-interface Popup { x: number; y: number; text: string; color: string; t: number; life: number; size: number }
-interface Particle { x: number; y: number; vx: number; vy: number; t: number; life: number; color: string; r: number; g: number; ring?: boolean }
-interface Mover { x: number; y: number; tx: number; ty: number; wait: number; dir: number; ph: number; moving: boolean; trail: number }
-interface Decor { x: number; y: number; at: number; kind: number; ph: number; s: number }
-
-export interface CollectedItem { kind: number; x: number; y: number; sector: number; tide: boolean }
-
-/** Seconds a message in a bottle stays before drifting away. */
-const BOTTLE_LIFE = 45;
-const VISIBLE_CAP: Record<UnitId, number> = { worker: 1, cleaner: 1, boat: 1, floater: 1, vessel: 1, drone: 1, robot: 1 };
-const SPEED: Record<UnitId, number> = { worker: 26, cleaner: 36, boat: 30, floater: 0, vessel: 13, drone: 62, robot: 11 };
-const WORKER_SHIRTS = ['#ff9f43', '#ff7aa2', '#7c9cf5', '#4cc27a', '#b58cf0', '#f2c14e'];
+interface Particle { x: number; y: number; vx: number; vy: number; t: number; life: number; color: string; r: number }
+interface Popup { x: number; y: number; text: string; color: string; t: number; size: number }
+interface Flyer { i: number; x: number; y: number; t: number }
+interface Helper { x: number; y: number; tx: number; ty: number; sea: boolean; ph: number; dir: number; idle: number }
+interface Critter { id: string; x: number; y: number; tx: number; ty: number; ph: number; dir: number; wait: number }
+interface Decor { x: number; y: number; kind: number; s: number; ph: number }
 
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -36,553 +28,559 @@ function rng(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const smooth = (x: number): number => {
-  x = Math.max(0, Math.min(1, x));
-  return x * x * (3 - 2 * x);
-};
-const lerp = (a: number, b: number, t: number): number => a + (b - a) * Math.max(0, Math.min(1, t));
+function hash(x: number, y: number): number {
+  let h = Math.imul(x, 374761393) + Math.imul(y, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** Smooth value noise in 0..1. */
+function noise(x: number, y: number): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = hash(x0, y0) + (hash(x0 + 1, y0) - hash(x0, y0)) * sx;
+  const b = hash(x0, y0 + 1) + (hash(x0 + 1, y0 + 1) - hash(x0, y0 + 1)) * sx;
+  return a + (b - a) * sy;
+}
+
+const LAND_DIRT =[[128, 112, 88], [120, 104, 80], [134, 118, 94], [112, 98, 76], [126, 114, 90], [118, 108, 84]];
+const SEA_DIRT = [[78, 92, 72], [72, 86, 66], [84, 94, 74], [82, 86, 66], [74, 88, 72]];
+const PLASTIC = [[232, 87, 79], [79, 163, 232], [242, 242, 242], [92, 198, 160], [246, 185, 59], [255, 138, 190]];
+
+/** Ground decoration revealed as the dirt goes: shells and pebbles on the sand, seagrass and coral underwater. */
+const DECOR: Decor[] = (() => {
+  const rand = rng(4242);
+  const out: Decor[] = [];
+  for (let id = 0; id < SECTOR_N; id++) {
+    const x0 = (id % SCOLS) * SECTOR;
+    const y0 = Math.floor(id / SCOLS) * SECTOR;
+    for (let i = 0; i < 16; i++) {
+      const x = x0 + rand() * SECTOR;
+      const y = y0 + rand() * SECTOR;
+      const off = shoreY(x) - y;
+      if (Math.abs(off) < 10) continue;
+      const water = off > 0;
+      const kind = water ? (off > 260 ? 3 + Math.floor(rand() * 3) : rand() < 0.6 ? 6 : 7) : Math.floor(rand() * 3);
+      out.push({ x, y, kind, s: 0.7 + rand() * 0.6, ph: rand() * TAU });
+    }
+  }
+  return out;
+})();
+/** Palms dotted along the sand. kind = the sector they stand in. */
+const PALMS: Decor[] = (() => {
+  const rand = rng(99);
+  const out: Decor[] = [];
+  for (let id = 0; id < SECTOR_N; id++) {
+    if (isSeaSector(id) || rand() < 0.45) continue;
+    const x = (id % SCOLS) * SECTOR + 40 + rand() * (SECTOR - 80);
+    const y = Math.floor(id / SCOLS) * SECTOR + 40 + rand() * (SECTOR - 80);
+    out.push({ x, y, kind: id, s: 0.95 + rand() * 0.35, ph: rand() * TAU });
+  }
+  return out;
+})();
+
+/** A seamless tile of grime and small debris, 64 world px wide, drawn at 4 px per world px. */
+function dirtPattern(c: C, sea: boolean): CanvasPattern {
+  const N = 256;
+  const cv = document.createElement('canvas');
+  cv.width = N;
+  cv.height = N;
+  const g = cv.getContext('2d')!;
+  const rand = rng(sea ? 515 : 717);
+  const wrap = (fn: (ox: number, oy: number) => void) => {
+    for (const ox of [-N, 0, N]) for (const oy of [-N, 0, N]) fn(ox, oy);
+  };
+  const dot = (x: number, y: number, r: number, col: string) => wrap((ox, oy) => {
+    g.beginPath();
+    g.arc(x + ox, y + oy, r, 0, TAU);
+    g.fillStyle = col;
+    g.fill();
+  });
+  for (let i = 0; i < 1100; i++) {
+    const dark = rand() < 0.62;
+    const col = sea
+      ? (dark ? `rgba(40,58,40,${0.25 + rand() * 0.35})` : `rgba(190,215,170,${0.12 + rand() * 0.2})`)
+      : (dark ? `rgba(70,54,36,${0.25 + rand() * 0.4})` : `rgba(235,220,185,${0.15 + rand() * 0.25})`);
+    dot(rand() * N, rand() * N, 0.8 + rand() * rand() * 4, col);
+  }
+  // twigs / seaweed strands
+  for (let i = 0; i < 16; i++) {
+    const x = rand() * N;
+    const y = rand() * N;
+    const a = rand() * TAU;
+    const len = 10 + rand() * 22;
+    wrap((ox, oy) => {
+      g.beginPath();
+      g.moveTo(x + ox, y + oy);
+      g.quadraticCurveTo(x + ox + Math.cos(a + 0.6) * len * 0.5, y + oy + Math.sin(a + 0.6) * len * 0.5, x + ox + Math.cos(a) * len, y + oy + Math.sin(a) * len);
+      g.strokeStyle = sea ? 'rgba(52,110,60,0.75)' : 'rgba(96,70,44,0.8)';
+      g.lineWidth = 1.6 + rand();
+      g.lineCap = 'round';
+      g.stroke();
+    });
+  }
+  // bits of plastic, caps and butts
+  for (let i = 0; i < 22; i++) {
+    const x = rand() * N;
+    const y = rand() * N;
+    const a = rand() * TAU;
+    const p = PLASTIC[Math.floor(rand() * PLASTIC.length)]!;
+    const kind = rand();
+    wrap((ox, oy) => {
+      g.save();
+      g.translate(x + ox, y + oy);
+      g.rotate(a);
+      if (kind < 0.5) {
+        g.fillStyle = `rgba(${p[0]},${p[1]},${p[2]},0.9)`;
+        g.fillRect(-4 - rand() * 3, -1.5 - rand() * 1.5, 8 + rand() * 4, 3 + rand() * 2);
+      } else if (kind < 0.75) {
+        g.beginPath();
+        g.arc(0, 0, 2.6, 0, TAU);
+        g.fillStyle = `rgba(${p[0]},${p[1]},${p[2]},0.95)`;
+        g.fill();
+      } else if (!sea) {
+        g.fillStyle = '#f4efe6';
+        g.fillRect(-4, -1.1, 6, 2.2);
+        g.fillStyle = '#d98a3a';
+        g.fillRect(2, -1.1, 2.5, 2.2);
+      } else {
+        g.beginPath();
+        g.ellipse(0, 0, 5, 2.4, 0, 0, TAU);
+        g.fillStyle = 'rgba(255,255,255,0.35)';
+        g.fill();
+      }
+      g.restore();
+    });
+  }
+  const pat = c.createPattern(cv, 'repeat')!;
+  pat.setTransform(new DOMMatrix().scale(64 / N));
+  return pat;
+}
 
 export class Scene {
-  onCollect: (items: CollectedItem[], x: number, y: number) => void = () => {};
-  /** The player tapped a locked sector. */
-  onSector: (id: number, sea: boolean) => void = () => {};
-  onBottle: (x: number, y: number) => void = () => {};
+  /** Sweep at a point; returns what got cleaned. Wired to the rules by main. */
+  sweepAt: (x: number, y: number, r: number, reach: sim.Reach) => sim.SweepOut = () => ({ cells: 0, coins: 0, events: [] });
+  pickAt: (x: number, y: number, reach: sim.Reach) => sim.PickOut = () => ({ coins: 0, picked: [], tooBig: [] });
+  onSector: (id: number) => void = () => {};
+  onTooBig: (i: number) => void = () => {};
 
   private c: C;
   private W = 390;
-  private H = 560;
-  private k = 1;
+  private H = 600;
+  private dpr = 1;
   private t = 0;
-  private r = 0; // smoothed restoration 0..1
-  private state: GameState;
+  private camX = 0;
+  private camY = 0;
+  private zoom = 2;
 
-  private trash: Trash[] = [];
-  private spawnTimer = 0;
-  private tideTimer = 3;
-  private flies: Fly[] = [];
-  private popups: Popup[] = [];
+  // dirt layer
+  private dirtCv: HTMLCanvasElement;
+  private buf = document.createElement('canvas');
+  private bctx = this.buf.getContext('2d')!;
+  private landPat: CanvasPattern;
+  private seaPat: CanvasPattern;
+  private dirtCtx: CanvasRenderingContext2D;
+  private img: ImageData;
+  private dx0 = GW;
+  private dy0 = GH;
+  private dx1 = -1;
+  private dy1 = -1;
+
   private parts: Particle[] = [];
-  private units: Record<UnitId, Mover[]> = { worker: [], cleaner: [], boat: [], floater: [], vessel: [], drone: [], robot: [] };
-  private crabs: Mover[] = [];
-  private pipers: Mover[] = [];
-  private school: Mover | null = null;
-  private turtleM: Mover | null = null;
-  private mantaM: Mover | null = null;
-  private dolphinJump = { x: 0, y: 0, t: 9, next: 3, dir: 1 };
-  private pointer: { x: number; y: number } | null = null;
-  private sectorFx: Record<number, number> = {};
-  private sea: boolean[] = [];
-  private player: Mover = { x: 0, y: 0, tx: 0, ty: 0, wait: 0, dir: 1, ph: 0, moving: false, trail: 0 };
-  private bottle: { x: number; y: number; age: number; ph: number } | null = null;
-  private bottleTimer = 45;
+  private popups: Popup[] = [];
+  private flyers: Flyer[] = [];
+  private helpers: Helper[] = [];
+  private critters: Critter[] = [];
+  private critterTimer = 0;
   private coinAcc = 0;
   private coinTimer = 0;
+  private dir = 1;
+  private moving = false;
+  private tooBigShown = -1;
 
-  // static decor, regenerated on resize
-  private pebbles: Decor[] = [];
-  private stains: Decor[] = [];
-  private murk: Decor[] = [];
-  private plants: Decor[] = [];
-  private palms: Decor[] = [];
-  private grass: Decor[] = [];
-  private corals: Decor[] = [];
-  private rocks: Decor[] = [];
-  private waves: Decor[] = [];
-  private sparkles: Decor[] = [];
-  private starSpots: Decor[] = [];
-  private station = { x: 0, y: 0 };
-  private store = { x: 0, y: 0 };
-  private pierPos = { x: 0, y: 0 };
+  // input
+  private stick: { ox: number; oy: number; x: number; y: number; id: number; t0: number; dragged: boolean } | null = null;
+  private keys = new Set<string>();
+  private target: { x: number; y: number } | null = null;
 
-  constructor(private cv: HTMLCanvasElement, state: GameState) {
+  constructor(private cv: HTMLCanvasElement, private s: GameState, private f: sim.Field) {
     this.c = cv.getContext('2d')!;
-    this.state = state;
-    this.r = pct(state) / 100;
+    this.landPat = dirtPattern(this.c, false);
+    this.seaPat = dirtPattern(this.c, true);
+    this.dirtCv = document.createElement('canvas');
+    this.dirtCv.width = GW;
+    this.dirtCv.height = GH;
+    this.dirtCtx = this.dirtCv.getContext('2d')!;
+    this.img = this.dirtCtx.createImageData(GW, GH);
+    this.paintDirt();
+    f.onCell = (gx, gy) => {
+      this.img.data[(gy * GW + gx) * 4 + 3] = 0;
+      if (gx < this.dx0) this.dx0 = gx;
+      if (gy < this.dy0) this.dy0 = gy;
+      if (gx > this.dx1) this.dx1 = gx;
+      if (gy > this.dy1) this.dy1 = gy;
+    };
+    this.camX = s.px;
+    this.camY = s.py;
     this.resize();
-    this.fillSectors(true);
-    const at = (e: PointerEvent) => {
+    this.zoom = this.targetZoom();
+    this.bindInput();
+  }
+
+  // ---- dirt texture --------------------------------------------------------
+
+  private paintDirt(): void {
+    const d = this.img.data;
+    for (let gy = 0; gy < GH; gy++) {
+      for (let gx = 0; gx < GW; gx++) {
+        const i = gy * GW + gx;
+        const o = i * 4;
+        const h = hash(gx, gy);
+        const sea = isWaterCell(gx, gy);
+        const pal = sea ? SEA_DIRT : LAND_DIRT;
+        const col = pal[0]!;
+        // soft large-scale blotches; the fine detail comes from the texture drawn on top
+        const blot = 0.8 + 0.3 * (0.75 * noise(gx / 9, gy / 9) + 0.25 * h);
+        d[o] = Math.min(255, col[0]! * blot);
+        d[o + 1] = Math.min(255, col[1]! * blot);
+        d[o + 2] = Math.min(255, col[2]! * blot);
+        d[o + 3] = this.f.dirt[i] ? (sea ? 215 : 245) : 0;
+      }
+    }
+    this.dirtCtx.putImageData(this.img, 0, 0);
+  }
+  private flushDirt(): void {
+    if (this.dx1 < 0) return;
+    this.dirtCtx.putImageData(this.img, 0, 0, this.dx0, this.dy0, this.dx1 - this.dx0 + 1, this.dy1 - this.dy0 + 1);
+    this.dx0 = GW; this.dy0 = GH; this.dx1 = -1; this.dy1 = -1;
+  }
+
+  // ---- input ----------------------------------------------------------------
+
+  private bindInput(): void {
+    const cv = this.cv;
+    const pos = (e: PointerEvent) => {
       const b = cv.getBoundingClientRect();
       return { x: e.clientX - b.left, y: e.clientY - b.top };
     };
     cv.addEventListener('pointerdown', (e) => {
-      const p = at(e);
-      try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic pointer: nothing to capture */ }
-      this.pointer = p;
-      this.press(p.x, p.y);
+      if (this.stick) return;
+      const p = pos(e);
+      try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+      this.stick = { ox: p.x, oy: p.y, x: p.x, y: p.y, id: e.pointerId, t0: performance.now(), dragged: false };
     });
     cv.addEventListener('pointermove', (e) => {
-      if (this.pointer) this.pointer = at(e);
+      const st = this.stick;
+      if (!st || e.pointerId !== st.id) return;
+      const p = pos(e);
+      st.x = p.x;
+      st.y = p.y;
+      if (Math.hypot(p.x - st.ox, p.y - st.oy) > 10) { st.dragged = true; this.target = null; }
     });
-    const up = () => { this.pointer = null; };
-    cv.addEventListener('pointerup', up);
-    cv.addEventListener('pointercancel', up);
+    const end = (e: PointerEvent) => {
+      const st = this.stick;
+      if (!st || e.pointerId !== st.id) return;
+      this.stick = null;
+      if (!st.dragged && performance.now() - st.t0 < 350) this.tap(st.ox, st.oy);
+    };
+    cv.addEventListener('pointerup', end);
+    cv.addEventListener('pointercancel', end);
+    window.addEventListener('keydown', (e) => { this.keys.add(e.key.toLowerCase()); });
+    window.addEventListener('keyup', (e) => { this.keys.delete(e.key.toLowerCase()); });
+    window.addEventListener('blur', () => this.keys.clear());
   }
 
-  // ---- geometry ----------------------------------------------------------
+  toWorld(sx: number, sy: number): { x: number; y: number } {
+    return { x: this.camX + (sx - this.W / 2) / this.zoom, y: this.camY + (sy - this.H / 2) / this.zoom };
+  }
+  private toScreen(x: number, y: number): { x: number; y: number } {
+    return { x: (x - this.camX) * this.zoom + this.W / 2, y: (y - this.camY) * this.zoom + this.H / 2 };
+  }
 
-  /** Screen y of the shoreline at screen x. Water is above the line, sand below. */
-  shoreY(x: number): number {
-    return this.H * 0.5 + (x - this.W * 0.5) * 0.5 + Math.sin(x * 0.018 / this.k + 1.3) * 7 * this.k;
-  }
-  private isWater(x: number, y: number): boolean {
-    return y < this.shoreY(x);
-  }
-  private nearBuilding(x: number, y: number, d: number): boolean {
-    const k = this.k;
-    return Math.hypot(x - this.station.x, (y - this.station.y + 14 * k) * 1.6) < d * k * 1.25
-      || Math.hypot(x - this.store.x, (y - this.store.y + 8 * k) * 1.6) < d * k;
-  }
-  private randSand(rand: () => number = Math.random, margin = 16): { x: number; y: number } {
-    const k = this.k;
-    for (let i = 0; i < 40; i++) {
-      const x = (0.04 + rand() * 0.92) * this.W;
-      const y = (0.1 + rand() * 0.87) * this.H;
-      if (y > this.shoreY(x) + margin * k && !this.nearBuilding(x, y, 36)) return { x, y };
+  private tap(sx: number, sy: number): void {
+    const w = this.toWorld(sx, sy);
+    const id = sectorAt(w.x, w.y);
+    if (id >= 0 && !this.s.sectors.includes(id)) {
+      this.onSector(id);
+      return;
     }
-    return { x: this.W * 0.3, y: this.H * 0.9 };
-  }
-  private randWater(rand: () => number = Math.random, minOff = 22, maxOff = 9999): { x: number; y: number } {
-    const k = this.k;
-    for (let i = 0; i < 40; i++) {
-      const x = (0.05 + rand() * 0.9) * this.W;
-      const y = (0.05 + rand() * 0.8) * this.H;
-      const off = this.shoreY(x) - y;
-      if (off > minOff * k && off < maxOff * k && !this.onPier(x, y)) return { x, y };
-    }
-    return { x: this.W * 0.7, y: this.H * 0.15 };
-  }
-  private onPier(x: number, y: number): boolean {
-    const dx = x - this.pierPos.x;
-    const dy = y - this.pierPos.y;
-    const along = dx * 0.894 - dy * 0.447;
-    const across = Math.abs(dx * 0.447 + dy * 0.894);
-    return along > -6 * this.k && along < 70 * this.k && across < 14 * this.k;
+    if (this.allowed(w.x, w.y)) this.target = w;
   }
 
-  // ---- sectors -------------------------------------------------------------
+  /** Walk / sail to a point (used by the map). */
+  goTo(x: number, y: number): void {
+    this.target = { x, y };
+  }
 
-  private gridTop(): number {
-    return this.H * 0.16;
+  private allowed(x: number, y: number): boolean {
+    const id = sectorAt(x, y);
+    if (id < 0 || !this.f.open[id]) return false;
+    return !isWater(x, y) || this.s.boat;
   }
-  sectorRect(id: number): { x: number; y: number; w: number; h: number } {
-    const top = this.gridTop();
-    const w = this.W / SECTOR_COLS;
-    const h = (this.H - top) / SECTOR_ROWS;
-    return { x: (id % SECTOR_COLS) * w, y: top + Math.floor(id / SECTOR_COLS) * h, w, h };
-  }
-  /** Sector under a screen point, or -1 above the grid. */
-  sectorAt(x: number, y: number): number {
-    const top = this.gridTop();
-    if (y < top) return -1;
-    const col = Math.min(SECTOR_COLS - 1, Math.max(0, Math.floor((x / this.W) * SECTOR_COLS)));
-    const row = Math.min(SECTOR_ROWS - 1, Math.floor(((y - top) / (this.H - top)) * SECTOR_ROWS));
-    return row * SECTOR_COLS + col;
-  }
-  private isOpen(id: number): boolean {
-    return id >= 0 && this.state.sectors.includes(id);
-  }
-  private randIn(id: number, margin = 14): { x: number; y: number } {
-    const k = this.k;
-    const r = this.sectorRect(id);
-    const sea = this.sea[id];
-    for (let i = 0; i < 30; i++) {
-      const x = r.x + (0.1 + Math.random() * 0.8) * r.w;
-      const y = r.y + (0.1 + Math.random() * 0.8) * r.h;
-      const off = this.shoreY(x) - y;
-      if (sea ? off > margin * k : off < -margin * k) {
-        if (!this.onPier(x, y) && !this.nearBuilding(x, y, 30)) return { x, y };
-      }
-    }
-    return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
-  }
+
+  // ---- geometry -------------------------------------------------------------
 
   resize(): void {
-    const dpr = Math.min(3, window.devicePixelRatio || 1);
-    const w = this.cv.clientWidth || 390;
-    const h = this.cv.clientHeight || 560;
-    const sx = w / this.W;
-    const sy = h / this.H;
-    this.W = w;
-    this.H = h;
-    this.k = Math.min(w / 320, h / 470);
-    this.sea = Array.from({ length: SECTOR_COUNT }, (_, id) => {
-      const r = this.sectorRect(id);
-      return r.y + r.h / 2 < this.shoreY(r.x + r.w / 2);
-    });
-    this.cv.width = Math.round(w * dpr);
-    this.cv.height = Math.round(h * dpr);
-    this.c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    for (const tr of this.trash) { tr.x *= sx; tr.y *= sy; }
-    this.bottle = null;
-    this.buildDecor();
-    const reseat = (m: Mover, water: boolean) => {
-      const p = water ? this.randWater() : this.randSand();
-      m.x = m.tx = p.x;
-      m.y = m.ty = p.y;
-    };
-    for (const id of Object.keys(this.units) as UnitId[]) for (const m of this.units[id]) reseat(m, id !== 'worker' && id !== 'cleaner');
-    this.crabs = [];
-    this.pipers = [];
-    this.school = this.turtleM = this.mantaM = null;
-    this.player.x = this.player.tx = w * 0.42;
-    this.player.y = this.player.ty = h * 0.9;
+    this.dpr = Math.min(3, window.devicePixelRatio || 1);
+    this.W = this.cv.clientWidth || 390;
+    this.H = this.cv.clientHeight || 600;
+    this.cv.width = Math.round(this.W * this.dpr);
+    this.cv.height = Math.round(this.H * this.dpr);
+  }
+  /** Close-up with a tiny tool; the camera pulls back as the tool grows. */
+  private targetZoom(): number {
+    const viewW = 120 + sim.toolRadius(this.s) * 11;
+    return Math.max(this.W / viewW, Math.min(this.W / WORLD_W, this.H / WORLD_H) * 1.02);
   }
 
-  private buildDecor(): void {
-    const { W, H, k } = this;
-    const rand = rng(20240607);
-    this.station = { x: W * 0.25, y: Math.max(this.shoreY(W * 0.25) + 96 * k, H * 0.8) };
-    this.store = { x: W * 0.6, y: Math.max(this.shoreY(W * 0.6) + 70 * k, H * 0.9) };
-    this.pierPos = { x: W * 0.72, y: this.shoreY(W * 0.72) + 3 * k };
-    const mk = (p: { x: number; y: number }, at = 0, kind = 0): Decor => ({ ...p, at, kind, ph: rand() * TAU, s: 0.7 + rand() * 0.6 });
-    this.pebbles = Array.from({ length: 46 }, () => mk(this.randSand(rand, 6), 0, Math.floor(rand() * 3)));
-    this.stains = Array.from({ length: 9 }, () => mk(this.randSand(rand, 10)));
-    this.murk = Array.from({ length: 10 }, () => mk(this.randWater(rand, 10)));
-    this.plants = Array.from({ length: 20 }, (_, i) => mk(this.randSand(rand, 34), 0.3 + (i / 20) * 0.6, i % 5 === 4 ? 2 : i % 3 === 1 ? 1 : 0));
-    const palmAt = [0, 0.36, 0.48, 0.6, 0.72, 0.84];
-    const palmX = [0.08, 0.2, 0.93, 0.06, 0.4, 0.8];
-    const palmOff = [58, 150, 60, 190, 215, 120];
-    this.palms = palmX.map((px, i) => {
-      let x = px * W;
-      let y = Math.min(H - 6 * k, this.shoreY(x) + palmOff[i] * k);
-      // keep trees clear of the buildings on any screen shape
-      for (let n = 0; n < 6 && this.nearBuilding(x, y, 58); n++) {
-        x = (x + W * 0.13) % (W * 0.94);
-        y = Math.min(H - 6 * k, this.shoreY(x) + palmOff[i] * k);
-      }
-      return { x, y, at: palmAt[i], kind: i, ph: rand() * TAU, s: 0.85 + rand() * 0.3 };
-    });
-    this.grass = Array.from({ length: 14 }, (_, i) => mk(this.randWater(rand, 14, 80), 0.42 + (i / 14) * 0.3));
-    this.corals = Array.from({ length: 11 }, (_, i) => mk(this.randWater(rand, 26, 110), 0.62 + (i / 11) * 0.34, i));
-    this.rocks = Array.from({ length: 4 }, () => mk(this.randWater(rand, 20, 90)));
-    this.waves = Array.from({ length: 30 }, () => mk(this.randWater(rand, 12)));
-    this.sparkles = Array.from({ length: 34 }, () => mk(this.randWater(rand, 14)));
-    this.starSpots = [mk({ x: W * 0.34, y: this.shoreY(W * 0.34) + 14 * k }), mk(this.randWater(rand, 12, 40))];
-  }
+  // ---- effects --------------------------------------------------------------
 
-  // ---- trash -------------------------------------------------------------
-
-  private visibleIn(id: number, tide: boolean): number {
-    let n = 0;
-    for (const tr of this.trash) if (tr.sector === id && tr.tide === tide) n++;
-    return n;
+  popup(x: number, y: number, text: string, color = '#ffffff', size = 15): void {
+    this.popups.push({ x, y, text, color, t: 0, size });
+    if (this.popups.length > 30) this.popups.shift();
   }
-
-  private spawnIn(id: number, tide: boolean, initial: boolean): void {
-    const sea = this.sea[id] ?? false;
-    const p = this.randIn(id);
-    let kind = Math.floor(Math.random() * 4);
-    const roll = Math.random();
-    if (roll < 0.03 && sea) kind = 5;
-    else if (roll < 0.09) kind = 4;
-    else if (roll < 0.15 && sea) kind = 6;
-    this.trash.push({ x: p.x, y: p.y, kind, water: sea, age: initial ? 1 : 0, rot: (Math.random() - 0.5) * 0.8, ph: Math.random() * TAU, sector: id, tide });
-  }
-
-  /** Top up every open sector: its remaining mess (up to 8 pieces on screen) and a little tide trash once clean. */
-  private fillSectors(all: boolean): void {
-    const st = this.state;
-    const tideCap = has(st, 'c2') ? 3 : 2;
-    for (const id of st.sectors) {
-      const left = st.sectorLeft[id] ?? 0;
-      if (left > 0) {
-        const want = Math.min(left, 8) - this.visibleIn(id, false);
-        for (let i = 0; i < (all ? want : Math.min(1, want)); i++) this.spawnIn(id, false, all);
-      } else if (all) {
-        for (let i = this.visibleIn(id, true); i < tideCap; i++) this.spawnIn(id, true, true);
-      }
-    }
-  }
-  private spawnTide(): void {
-    const st = this.state;
-    const cap = has(st, 'c2') ? 3 : 2;
-    const open = st.sectors.filter((id) => (st.sectorLeft[id] ?? 0) <= 0 && this.visibleIn(id, true) < cap);
-    if (open.length) this.spawnIn(open[Math.floor(Math.random() * open.length)]!, true, false);
-  }
-
-  /** Finger down: buy a locked sector, grab a bottle, or start steering the sweeper. */
-  private press(x: number, y: number): void {
-    const k = this.k;
-    const bt = this.bottle;
-    if (bt && Math.hypot(bt.x - x, bt.y - 8 * k - y) < 34 * k) {
-      this.bottle = null;
-      this.bottleTimer = 100 + Math.random() * 60;
-      this.burst(bt.x, bt.y - 8 * k, '255,226,130', 18, 110);
-      this.onBottle(bt.x, bt.y);
-      this.pointer = null;
-      return;
-    }
-    const id = this.sectorAt(x, y);
-    if (id >= 0 && !this.isOpen(id)) {
-      this.pointer = null;
-      this.onSector(id, this.sea[id] ?? false);
-      return;
-    }
-    this.steer(x, y);
-  }
-
-  /** Point the player at a spot. They stay on the sand unless they own a boat. */
-  private steer(x: number, y: number): void {
-    const k = this.k;
-    this.player.tx = Math.max(10 * k, Math.min(this.W - 10 * k, x));
-    let ty = Math.min(this.H - 8 * k, Math.max(this.gridTop() + 6 * k, y + 4 * k));
-    if (!sim.canSail(this.state)) ty = Math.max(ty, this.shoreY(this.player.tx) + 12 * k);
-    this.player.ty = ty;
-  }
-
-  /** Playful feedback when a sector is bought. */
-  sectorOpened(id: number): void {
-    const r = this.sectorRect(id);
-    this.sectorFx[id] = 0;
-    for (let i = 0; i < 26; i++) this.burst(r.x + Math.random() * r.w, r.y + Math.random() * r.h, '255,244,200', 1, 50);
-    this.fillSectors(true);
-  }
-  sectorCleaned(id: number): void {
-    const r = this.sectorRect(id);
-    this.sectorFx[id] = 0;
-    for (let i = 0; i < 36; i++) this.burst(r.x + Math.random() * r.w, r.y + Math.random() * r.h, i % 2 ? '255,226,130' : '255,255,255', 1, 80);
-  }
-  isSea(id: number): boolean {
-    return !!this.sea[id];
-  }
-
-  // ---- effects -----------------------------------------------------------
-
-  popup(x: number, y: number, text: string, color = '#ffffff', size = 14): void {
-    this.popups.push({ x, y, text, color, t: 0, life: 1.1, size });
-    if (this.popups.length > 40) this.popups.shift();
-  }
-  burst(x: number, y: number, color: string, n: number, speed = 60): void {
+  burst(x: number, y: number, color: string, n: number, speed = 40): void {
     for (let i = 0; i < n; i++) {
       const a = Math.random() * TAU;
-      const v = (0.4 + Math.random() * 0.6) * speed * this.k;
-      this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 20 * this.k, t: 0, life: 0.5 + Math.random() * 0.3, color, r: (1.5 + Math.random() * 1.8) * this.k, g: 120 * this.k });
+      const v = (0.3 + Math.random() * 0.7) * speed;
+      this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, life: 0.5 + Math.random() * 0.4, color, r: 0.8 + Math.random() * 1.4 });
     }
+    if (this.parts.length > 400) this.parts.splice(0, this.parts.length - 400);
   }
-  /** Coins earned by recycling; shown as a gentle pop over the station now and then. */
-  addCoins(n: number): void {
-    this.coinAcc += n;
+  playerPos(): { x: number; y: number } {
+    return { x: this.s.px, y: this.s.py };
   }
-  purchaseFx(where: 'station' | 'store' | 'player'): void {
-    const p = where === 'station' ? this.station : where === 'store' ? this.store : this.player;
-    this.burst(p.x, p.y - 24 * this.k, '255,220,110', 14, 90);
+  sectorFx(id: number, color = '255,236,160'): void {
+    const x0 = (id % SCOLS) * SECTOR;
+    const y0 = Math.floor(id / SCOLS) * SECTOR;
+    for (let i = 0; i < 70; i++) this.burst(x0 + Math.random() * SECTOR, y0 + Math.random() * SECTOR, color, 1, 30 + Math.random() * 40);
   }
   celebrate(): void {
     const cols = ['255,138,128', '255,210,74', '110,220,170', '120,190,255', '200,160,255'];
-    for (let i = 0; i < 120; i++) {
-      this.parts.push({
-        x: Math.random() * this.W, y: -10 - Math.random() * this.H * 0.4, vx: (Math.random() - 0.5) * 40, vy: 60 + Math.random() * 80,
-        t: 0, life: 3.5 + Math.random() * 2, color: cols[i % cols.length], r: (2 + Math.random() * 2.5) * this.k, g: 30,
-      });
-    }
-  }
-  stationPos(): { x: number; y: number } {
-    return this.station;
+    const p = this.playerPos();
+    const span = this.W / this.zoom;
+    for (let i = 0; i < 140; i++) this.burst(p.x + (Math.random() - 0.5) * span, p.y + (Math.random() - 0.5) * span * 1.5, cols[i % 5]!, 1, 60);
   }
 
-  // ---- update ------------------------------------------------------------
+  // ---- update ---------------------------------------------------------------
 
-  private wander(m: Mover, dt: number, speed: number, pick: () => { x: number; y: number }, pause: number): void {
-    const dx = m.tx - m.x;
-    const dy = m.ty - m.y;
-    const d = Math.hypot(dx, dy);
-    if (d < 2) {
-      m.moving = false;
-      m.wait -= dt;
-      if (m.wait <= 0) {
-        const p = pick();
-        m.tx = p.x;
-        m.ty = p.y;
-        m.wait = pause * (0.5 + Math.random());
-      }
-      return;
-    }
-    m.moving = true;
-    const step = Math.min(d, speed * this.k * dt);
-    m.x += (dx / d) * step;
-    m.y += (dy / d) * step;
-    if (Math.abs(dx) > 0.5) m.dir = dx > 0 ? 1 : -1;
-  }
-
-  private newMover(p: { x: number; y: number }): Mover {
-    return { x: p.x, y: p.y, tx: p.x, ty: p.y, wait: Math.random(), dir: Math.random() < 0.5 ? 1 : -1, ph: Math.random() * TAU, moving: false, trail: 0 };
-  }
-
-  update(dt: number, state: GameState): void {
-    this.state = state;
+  update(dt: number): void {
+    const s = this.s;
     this.t += dt;
-    const k = this.k;
-    const target = pct(state) / 100;
-    this.r += (target - this.r) * Math.min(1, dt * 1.5);
+    const r = sim.toolRadius(s);
 
-    // trash drifting in
-    this.spawnTimer -= dt;
-    if (this.spawnTimer <= 0) {
-      this.spawnTimer = 0.25;
-      this.fillSectors(false);
-    }
-    this.tideTimer -= dt;
-    if (this.tideTimer <= 0) {
-      this.tideTimer = has(state, 'c2') ? 1.6 : 3;
-      this.spawnTide();
-    }
-    for (const key of Object.keys(this.sectorFx)) {
-      const id = Number(key);
-      this.sectorFx[id]! += dt;
-      if (this.sectorFx[id]! > 1.2) delete this.sectorFx[id];
-    }
-    for (const tr of this.trash) tr.age = Math.min(1, tr.age + dt * 2.5);
-
-    // message in a bottle: drifts in now and then and waits a good while to be picked up
-    if (this.bottle) {
-      this.bottle.age += dt;
-      if (this.bottle.age > BOTTLE_LIFE) {
-        this.bottle = null;
-        this.bottleTimer = 100 + Math.random() * 60;
-      }
-    } else if (state.totalWaste > 30) {
-      this.bottleTimer -= dt;
-      if (this.bottleTimer <= 0) {
-        const p = this.randWater(Math.random, 34, 170);
-        this.bottle = { x: p.x, y: Math.max(40 * k, p.y), age: 0, ph: Math.random() * TAU };
-      }
-    }
-
-    // player: follows the finger and sweeps up whatever is inside the tool's reach
-    {
-      const p = this.player;
-      if (this.pointer) this.steer(this.pointer.x, this.pointer.y);
-      const water = sim.canSail(state) && this.isWater(p.x, p.y);
-      const dx = p.tx - p.x;
-      const dy = p.ty - p.y;
+    // movement input: joystick, keys, or walking to a tapped point
+    let vx = 0;
+    let vy = 0;
+    if (this.stick?.dragged) {
+      const dx = this.stick.x - this.stick.ox;
+      const dy = this.stick.y - this.stick.oy;
       const d = Math.hypot(dx, dy);
-      p.moving = d > 2;
-      if (p.moving) {
-        const step = Math.min(d, sim.moveSpeed(state, water) * k * dt);
-        const here = this.isOpen(this.sectorAt(p.x, p.y));
-        const free = (x: number, y: number) => this.isOpen(this.sectorAt(x, y)) || !here;
-        const nx = p.x + (dx / d) * step;
-        const ny = p.y + (dy / d) * step;
-        if (free(nx, ny)) { p.x = nx; p.y = ny; }
-        else if (free(nx, p.y)) p.x = nx;
-        else if (free(p.x, ny)) p.y = ny;
-        else p.moving = false;
-        if (Math.abs(dx) > 1) p.dir = dx > 0 ? 1 : -1;
-      }
-      p.trail -= dt;
-      if (water && p.moving && p.trail <= 0) {
-        p.trail = 0.22;
-        this.parts.push({ x: p.x - p.dir * 16 * k, y: p.y, vx: 0, vy: 0, t: 0, life: 1.1, color: '255,255,255', r: 3 * k, g: 0, ring: true });
-      }
-      const reach = sim.sweepRadius(state, water) * k;
-      const hit = this.trash.filter((tr) => tr.age > 0.5 && Math.hypot(tr.x - p.x, (tr.y - p.y) * 1.6) < reach);
-      if (hit.length) {
-        const items: CollectedItem[] = [];
-        for (const tr of hit) {
-          this.trash.splice(this.trash.indexOf(tr), 1);
-          this.flies.push({ x0: tr.x, y0: tr.y, x1: this.store.x, y1: this.store.y - 16 * k, t: 0, kind: tr.kind });
-          this.burst(tr.x, tr.y - 6 * k, tr.water ? '255,255,255' : '255,236,170', 5);
-          items.push({ kind: tr.kind, x: tr.x, y: tr.y, sector: tr.sector, tide: tr.tide });
-        }
-        this.onCollect(items, p.x, p.y);
+      const mag = Math.min(1, d / 48);
+      if (d > 4) { vx = (dx / d) * mag; vy = (dy / d) * mag; }
+    } else {
+      const k = this.keys;
+      vx = (k.has('arrowright') || k.has('d') ? 1 : 0) - (k.has('arrowleft') || k.has('a') ? 1 : 0);
+      vy = (k.has('arrowdown') || k.has('s') ? 1 : 0) - (k.has('arrowup') || k.has('w') ? 1 : 0);
+      const m = Math.hypot(vx, vy);
+      if (m > 0) { vx /= m; vy /= m; this.target = null; }
+      else if (this.target) {
+        const dx = this.target.x - s.px;
+        const dy = this.target.y - s.py;
+        const d = Math.hypot(dx, dy);
+        if (d < 2) this.target = null;
+        else { vx = dx / d; vy = dy / d; }
       }
     }
+    const onWater = s.boat && isWater(s.px, s.py);
+    const speed = sim.moveSpeed(s, onWater);
+    this.moving = vx !== 0 || vy !== 0;
+    const reach = { land: true, sea: s.boat };
+    if (this.moving) {
+      if (Math.abs(vx) > 0.05) this.dir = vx > 0 ? 1 : -1;
+      const total = speed * dt;
+      const steps = Math.max(1, Math.ceil(total / Math.max(2, r * 0.8)));
+      for (let i = 0; i < steps; i++) {
+        const nx = s.px + (vx * total) / steps;
+        const ny = s.py + (vy * total) / steps;
+        if (this.allowed(nx, ny)) { s.px = nx; s.py = ny; }
+        else if (this.allowed(nx, s.py)) s.px = nx;
+        else if (this.allowed(s.px, ny)) s.py = ny;
+        else { this.target = null; break; }
+        this.sweepHere(r, reach);
+      }
+    } else this.sweepHere(r, reach);
 
-    // automated units: keep the visible sprites in sync with what the player owns
-    for (const id of Object.keys(this.units) as UnitId[]) {
-      const list = this.units[id];
-      const want = Math.min(VISIBLE_CAP[id], state.units[id]);
-      const water = id !== 'worker' && id !== 'cleaner';
-      while (list.length < want) {
-        const off = id === 'vessel' ? 70 : id === 'floater' ? 40 : 26;
-        const m = this.newMover(water ? this.randWater(Math.random, off) : { x: this.station.x + 30 * k, y: this.station.y + 6 * k });
-        list.push(m);
-        this.burst(m.x, m.y - 10 * k, '255,255,255', 10, 70);
-      }
-      list.length = want;
-      for (const m of list) {
-        if (id === 'floater') continue;
-        const off = id === 'vessel' ? 70 : 26;
-        this.wander(m, dt, SPEED[id], () => (water ? this.randWater(Math.random, off) : this.randSand()), id === 'worker' ? 1.2 : id === 'drone' ? 0.8 : 0.4);
-        if (id === 'worker' && !m.moving && m.wait > 0 && Math.random() < dt * 1.5) this.burst(m.x + m.dir * 6 * k, m.y - 2 * k, '255,236,170', 2, 25);
-        if ((id === 'boat' || id === 'vessel') && m.moving) {
-          m.trail -= dt;
-          if (m.trail <= 0) {
-            m.trail = 0.22;
-            this.parts.push({ x: m.x - m.dir * (id === 'vessel' ? 30 : 16) * k, y: m.y, vx: 0, vy: 0, t: 0, life: 1.1, color: '255,255,255', r: 3 * k, g: 0, ring: true });
-          }
-        }
-      }
-    }
+    // camera
+    const zt = this.targetZoom();
+    this.zoom += (zt - this.zoom) * Math.min(1, dt * 2);
+    this.camX += (s.px - this.camX) * Math.min(1, dt * 6);
+    this.camY += (s.py - this.camY) * Math.min(1, dt * 6);
+    const hw = this.W / 2 / this.zoom;
+    const hh = this.H / 2 / this.zoom;
+    this.camX = hw * 2 >= WORLD_W ? WORLD_W / 2 : Math.max(hw, Math.min(WORLD_W - hw, this.camX));
+    this.camY = hh * 2 >= WORLD_H ? WORLD_H / 2 : Math.max(hh, Math.min(WORLD_H - hh, this.camY));
 
-    // animals that move around
-    const a = state.animals;
-    if (a.includes('crab')) {
-      while (this.crabs.length < 2) this.crabs.push(this.newMover(this.nearShoreSand()));
-      for (const m of this.crabs) this.wander(m, dt, 20, () => this.nearShoreSand(), 2.2);
-    }
-    if (a.includes('sandpiper')) {
-      while (this.pipers.length < 2) this.pipers.push(this.newMover(this.waterline()));
-      for (const m of this.pipers) this.wander(m, dt, 46, () => this.waterline(), 1.6);
-    }
-    if (a.includes('sardine')) {
-      if (!this.school) this.school = this.newMover(this.randWater(Math.random, 24, 120));
-      this.wander(this.school, dt, 24, () => this.randWater(Math.random, 24, 120), 0.3);
-    }
-    if (a.includes('turtle')) {
-      if (!this.turtleM) this.turtleM = this.newMover(this.randWater(Math.random, 30));
-      this.wander(this.turtleM, dt, 12, () => this.randWater(Math.random, 30), 1);
-    }
-    if (a.includes('manta')) {
-      if (!this.mantaM) this.mantaM = this.newMover(this.randWater(Math.random, 60));
-      this.wander(this.mantaM, dt, 16, () => this.randWater(Math.random, 60), 0.2);
-    }
-    if (a.includes('dolphin')) {
-      const j = this.dolphinJump;
-      j.t += dt;
-      j.next -= dt;
-      if (j.next <= 0) {
-        const p = this.randWater(Math.random, 70);
-        j.x = p.x; j.y = p.y; j.t = 0; j.next = 5 + Math.random() * 6; j.dir = Math.random() < 0.5 ? 1 : -1;
-        this.burst(p.x - j.dir * 16 * k, p.y, '255,255,255', 8, 50);
-      }
-      if (j.t > 1.0 && j.t - dt <= 1.0) this.burst(j.x + j.dir * 16 * k, j.y, '255,255,255', 10, 55);
-    }
-
-    // coin pops over the recycling station
+    // coin pops gathered over a short window
     this.coinTimer += dt;
-    if (this.coinTimer > 1.5) {
+    if (this.coinTimer > 0.4) {
       this.coinTimer = 0;
-      if (this.coinAcc >= 1) {
-        this.popup(this.station.x + 10 * k, this.station.y - 44 * k, '+' + fmtShort(this.coinAcc), '#ffd24a', 13);
+      if (this.coinAcc > 0) {
+        this.popup(s.px + (Math.random() - 0.5) * r, s.py - r - 6, '+' + fmtShort(this.coinAcc), '#ffe08a', 13);
         this.coinAcc = 0;
       }
     }
 
-    for (const f of this.flies) f.t += dt / 0.45;
-    for (const f of this.flies) if (f.t >= 1) this.burst(f.x1, f.y1, '255,255,255', 3, 30);
-    this.flies = this.flies.filter((f) => f.t < 1);
+    this.updateHelpers(dt);
+    this.updateCritters(dt);
+
+    for (const fl of this.flyers) fl.t += dt / 0.35;
+    this.flyers = this.flyers.filter((fl) => fl.t < 1);
     for (const p of this.popups) p.t += dt;
-    this.popups = this.popups.filter((p) => p.t < p.life);
+    this.popups = this.popups.filter((p) => p.t < 1.1);
     for (const p of this.parts) {
       p.t += dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.vy += p.g * dt;
+      p.vx *= 0.94;
+      p.vy *= 0.94;
     }
-    this.parts = this.parts.filter((p) => p.t < p.life && p.y < this.H + 20);
+    this.parts = this.parts.filter((p) => p.t < p.life);
   }
 
-  private nearShoreSand(): { x: number; y: number } {
-    const x = (0.08 + Math.random() * 0.84) * this.W;
-    return { x, y: Math.min(this.H - 8, this.shoreY(x) + (18 + Math.random() * 50) * this.k) };
-  }
-  private waterline(): { x: number; y: number } {
-    const x = (0.06 + Math.random() * 0.88) * this.W;
-    return { x, y: Math.min(this.H - 6, this.shoreY(x) + (9 + Math.random() * 7) * this.k) };
+  private sweepHere(r: number, reach: sim.Reach): void {
+    const s = this.s;
+    const res = this.sweepAt(s.px, s.py, r, reach);
+    if (res.cells > 0) {
+      this.coinAcc += res.coins;
+      const n = Math.min(3, 1 + (res.cells >> 3));
+      const sea = isWater(s.px, s.py);
+      for (let i = 0; i < n; i++) {
+        const a = Math.random() * TAU;
+        this.parts.push({
+          x: s.px + Math.cos(a) * r * 0.9, y: s.py + Math.sin(a) * r * 0.9, vx: Math.cos(a) * 18, vy: Math.sin(a) * 18 - 6,
+          t: 0, life: 0.45, color: sea ? '220,245,255' : '150,128,96', r: 0.6 + Math.random() * Math.max(0.8, r * 0.08),
+        });
+      }
+    }
+    const pk = this.pickAt(s.px, s.py, reach);
+    for (const i of pk.picked) {
+      const l = LITTER[i]!;
+      this.flyers.push({ i, x: l.x, y: l.y, t: 0 });
+      this.burst(l.x, l.y, '255,236,170', 6, 30);
+      this.popup(l.x, l.y - 8, '+' + fmtShort(sim.litterValue(s, i)), '#ffd24a', 16);
+    }
+    if (pk.tooBig.length && pk.tooBig[0] !== this.tooBigShown) {
+      this.tooBigShown = pk.tooBig[0]!;
+      this.onTooBig(pk.tooBig[0]!);
+    }
   }
 
-  // ---- draw --------------------------------------------------------------
+  private updateHelpers(dt: number): void {
+    const s = this.s;
+    for (const sea of [false, true]) {
+      const want = sea ? s.helpers.drone : s.helpers.bot;
+      let have = this.helpers.filter((h) => h.sea === sea).length;
+      while (have < want) {
+        const p = sim.helperTarget(s, this.f, sea) ?? { x: s.px, y: s.py };
+        this.helpers.push({ x: p.x, y: p.y, tx: p.x, ty: p.y, sea, ph: Math.random() * TAU, dir: 1, idle: 0 });
+        have++;
+      }
+    }
+    const r = sim.helperRadius(s);
+    for (const h of this.helpers) {
+      const dx = h.tx - h.x;
+      const dy = h.ty - h.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 2) {
+        h.idle -= dt;
+        // look for dirt right next to us first, then anywhere in our sectors
+        const near = this.nearDirt(h.x, h.y, h.sea, r * 6);
+        const p = near ?? (h.idle <= 0 ? sim.helperTarget(s, this.f, h.sea) : null);
+        if (p) { h.tx = p.x; h.ty = p.y; }
+        else if (h.idle <= 0) h.idle = 2;
+      } else {
+        const step = Math.min(d, sim.HELPER_SPEED * dt);
+        h.x += (dx / d) * step;
+        h.y += (dy / d) * step;
+        if (Math.abs(dx) > 0.5) h.dir = dx > 0 ? 1 : -1;
+      }
+      this.sweepAt(h.x, h.y, r, { land: !h.sea, sea: h.sea });
+    }
+  }
+
+  /** A random dirty cell close to a point, in an open sector of the right terrain. */
+  private nearDirt(x: number, y: number, sea: boolean, range: number): { x: number; y: number } | null {
+    for (let i = 0; i < 12; i++) {
+      const px = x + (Math.random() - 0.5) * range * 2;
+      const py = y + (Math.random() - 0.5) * range * 2;
+      const gx = Math.floor(px / CELL);
+      const gy = Math.floor(py / CELL);
+      if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) continue;
+      const id = sectorAt(px, py);
+      if (id < 0 || !this.f.open[id] || this.s.done.includes(id)) continue;
+      if (this.f.dirt[gy * GW + gx] && isWaterCell(gx, gy) === sea) return { x: px, y: py };
+    }
+    return null;
+  }
+
+  private cleanAt(x: number, y: number): boolean {
+    const gx = Math.floor(x / CELL);
+    const gy = Math.floor(y / CELL);
+    if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
+    return !this.f.dirt[gy * GW + gx];
+  }
+
+  /** Animals that have returned show up around you, on clean sand or in clean water. */
+  private updateCritters(dt: number): void {
+    const s = this.s;
+    const back = ANIMALS.filter((a) => s.animals.includes(a.id) && a.id !== 'gull' && a.id !== 'whale');
+    const hw = this.W / 2 / this.zoom;
+    const hh = this.H / 2 / this.zoom;
+    this.critters = this.critters.filter((c) => Math.abs(c.x - this.camX) < hw * 2.5 && Math.abs(c.y - this.camY) < hh * 2.5);
+    this.critterTimer -= dt;
+    if (back.length && this.critterTimer <= 0 && this.critters.length < 6) {
+      this.critterTimer = 0.8;
+      const a = back[Math.floor(Math.random() * back.length)]!;
+      for (let i = 0; i < 8; i++) {
+        const x = this.camX + (Math.random() - 0.5) * hw * 2.2;
+        const y = this.camY + (Math.random() - 0.5) * hh * 2.2;
+        if (isWater(x, y) !== a.sea || !this.cleanAt(x, y)) continue;
+        this.critters.push({ id: a.id, x, y, tx: x, ty: y, ph: Math.random() * TAU, dir: 1, wait: Math.random() * 2 });
+        break;
+      }
+    }
+    const speeds: Record<string, number> = { crab: 10, sandpiper: 26, starfish: 0, sardine: 22, clownfish: 14, seahorse: 5, turtle: 9, octopus: 6, dolphin: 34, manta: 14 };
+    for (const c of this.critters) {
+      const sp = speeds[c.id] ?? 10;
+      const dx = c.tx - c.x;
+      const dy = c.ty - c.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 1.5 || sp === 0) {
+        c.wait -= dt;
+        if (c.wait <= 0 && sp > 0) {
+          const a = ANIMALS.find((x) => x.id === c.id)!;
+          for (let i = 0; i < 6; i++) {
+            const nx = c.x + (Math.random() - 0.5) * 80;
+            const ny = c.y + (Math.random() - 0.5) * 80;
+            if (isWater(nx, ny) === a.sea && this.cleanAt(nx, ny)) { c.tx = nx; c.ty = ny; break; }
+          }
+          c.wait = 0.5 + Math.random() * 2;
+        }
+      } else {
+        const step = Math.min(d, sp * dt);
+        c.x += (dx / d) * step;
+        c.y += (dy / d) * step;
+        if (Math.abs(dx) > 0.3) c.dir = dx > 0 ? 1 : -1;
+      }
+    }
+  }
+
+  // ---- draw -----------------------------------------------------------------
 
   private at(x: number, y: number, s: number, fn: () => void, flip = 1): void {
     const c = this.c;
@@ -593,390 +591,478 @@ export class Scene {
     c.restore();
   }
 
-  private shorePath(off: number, wobble: number): void {
-    const c = this.c;
-    c.beginPath();
-    for (let x = -12; x <= this.W + 12; x += 8) {
-      const y = this.shoreY(x) + off + Math.sin(x * 0.045 / this.k + this.t * 1.4) * wobble;
-      if (x === -12) c.moveTo(x, y);
-      else c.lineTo(x, y);
-    }
-  }
-
-  /** Fog over locked sectors (with their price), faint borders and a "left" counter on the ones being cleaned. */
-  private drawSectors(): void {
-    const { c, k, t, state } = this;
-    const pill = (text: string, x: number, y: number, fg: string): void => {
-      c.font = `800 ${Math.round(13 * k)}px ui-rounded, "Nunito", system-ui, sans-serif`;
-      const w = c.measureText(text).width + 18 * k;
-      c.fillStyle = 'rgba(20,50,62,0.72)';
-      c.beginPath();
-      c.roundRect(x - w / 2, y - 12 * k, w, 24 * k, 12 * k);
-      c.fill();
-      c.fillStyle = fg;
-      c.fillText(text, x, y + 0.5 * k);
-    };
-    c.textAlign = 'center';
-    c.textBaseline = 'middle';
-    const cost = sim.sectorCost(state);
-    for (let id = 0; id < SECTOR_COUNT; id++) {
-      const r = this.sectorRect(id);
-      const pad = 2 * k;
-      if (!this.isOpen(id)) {
-        const sea = this.sea[id];
-        const block = sim.sectorBlock(state, id, !!sea);
-        const afford = block === null;
-        c.fillStyle = sea ? 'rgba(52,86,100,0.5)' : 'rgba(84,92,84,0.5)';
-        c.beginPath();
-        c.roundRect(r.x + pad, r.y + pad, r.w - pad * 2, r.h - pad * 2, 10 * k);
-        c.fill();
-        c.setLineDash([6 * k, 5 * k]);
-        c.strokeStyle = afford ? `rgba(255,226,130,${0.7 + 0.3 * Math.sin(t * 4)})` : 'rgba(255,255,255,0.35)';
-        c.lineWidth = 1.6 * k;
-        c.stroke();
-        c.setLineDash([]);
-        const cx = r.x + r.w / 2;
-        const cy = r.y + r.h / 2;
-        const blocked = sea && !sim.canSail(state);
-        pill(block === 'far' ? '🔒' : blocked ? '⛵ Boat' : `🔒 ${fmtShort(cost)}`, cx, cy, blocked ? '#cfe9f2' : afford ? '#ffd24a' : '#ffffff');
-      } else {
-        const left = state.sectorLeft[id] ?? 0;
-        c.setLineDash([3 * k, 7 * k]);
-        c.strokeStyle = 'rgba(255,255,255,0.22)';
-        c.lineWidth = 1 * k;
-        c.strokeRect(r.x + pad, r.y + pad, r.w - pad * 2, r.h - pad * 2);
-        c.setLineDash([]);
-        if (left > 0) {
-          c.font = `800 ${Math.round(10.5 * k)}px ui-rounded, "Nunito", system-ui, sans-serif`;
-          c.fillStyle = 'rgba(255,255,255,0.85)';
-          c.strokeStyle = 'rgba(30,70,85,0.5)';
-          c.lineWidth = 2.4 * k;
-          c.strokeText(`${left} left`, r.x + 28 * k, r.y + 13 * k);
-          c.fillText(`${left} left`, r.x + 28 * k, r.y + 13 * k);
-        } else {
-          c.font = `800 ${Math.round(11 * k)}px ui-rounded, "Nunito", system-ui, sans-serif`;
-          c.fillStyle = 'rgba(255,255,255,0.8)';
-          c.fillText('✓', r.x + 12 * k, r.y + 13 * k);
-        }
-        const fx = this.sectorFx[id];
-        if (fx !== undefined) {
-          c.fillStyle = `rgba(255,248,214,${0.55 * (1 - fx / 1.2)})`;
-          c.fillRect(r.x, r.y, r.w, r.h);
-        }
-      }
-    }
-  }
-
   draw(): void {
-    const { c, W, H, k, t, r } = this;
-    const state = this.state;
-    const animals = state.animals;
-    c.clearRect(0, 0, W, H);
+    this.flushDirt();
+    const { c, W, H, dpr, zoom: z, t, s } = this;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.fillStyle = '#2a9fc4';
+    c.fillRect(0, 0, W, H);
+    c.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - this.camX * z), dpr * (H / 2 - this.camY * z));
+    const vx0 = this.camX - W / 2 / z;
+    const vy0 = this.camY - H / 2 / z;
+    const vx1 = this.camX + W / 2 / z;
+    const vy1 = this.camY + H / 2 / z;
+    const px = 1 / z; // one screen pixel in world units
 
     // --- water
-    const gx = W * 0.4;
-    const gy = this.shoreY(gx);
-    const wg = c.createLinearGradient(gx, gy, gx + H * 0.3, gy - H * 0.62);
-    wg.addColorStop(0, S.mix('#b3bfa6', '#9af0df', r));
-    wg.addColorStop(0.35, S.mix('#93a79b', '#4fd8d0', r));
-    wg.addColorStop(1, S.mix('#6f8a86', '#1ea7cf', r));
+    const wg = c.createLinearGradient(0, 0, 0, shoreY(WORLD_W / 2));
+    wg.addColorStop(0, '#1d86b8');
+    wg.addColorStop(0.7, '#2fb5cf');
+    wg.addColorStop(1, '#7fe3dc');
     c.fillStyle = wg;
-    c.fillRect(0, 0, W, H);
-
-    // murk patches fade away early on
-    if (r < 0.32) {
-      const al = 0.3 * (1 - r / 0.32);
-      for (const m of this.murk) S.ell(c, m.x + Math.sin(t * 0.3 + m.ph) * 5, m.y, 30 * k * m.s, 12 * k * m.s, `rgba(74,82,60,${al})`);
-    }
-
-    // --- seabed life (under the surface)
-    c.save();
-    c.globalAlpha = 0.9;
-    for (const rk of this.rocks) this.at(rk.x, rk.y, k * rk.s, () => S.rock(c));
-    for (const g of this.grass) {
-      const gs = smooth((r - g.at) / 0.08);
-      if (gs > 0) this.at(g.x, g.y, k * g.s * gs, () => S.seagrass(c, t + g.ph));
-    }
-    for (const co of this.corals) {
-      const cs = smooth((r - co.at) / 0.08);
-      if (cs > 0) this.at(co.x, co.y, k * co.s * cs * 1.15, () => S.coral(c, co.kind));
-    }
-    if (animals.includes('octopus')) this.at(this.rocks[0].x + 9 * k, this.rocks[0].y - 1 * k, k * 0.95, () => S.octopus(c, t));
-    if (animals.includes('seahorse')) this.at(this.grass[2].x + 7 * k, this.grass[2].y - 4 * k, k * 0.9, () => S.seahorse(c, t));
-    if (animals.includes('starfish')) this.at(this.starSpots[1].x, this.starSpots[1].y, k * 0.9, () => S.starfish(c, t));
-    if (animals.includes('clownfish')) {
-      const home = this.corals[1];
-      for (let i = 0; i < 2; i++) {
-        const an = t * 0.9 + i * Math.PI;
-        this.at(home.x + Math.cos(an) * 13 * k, home.y - 6 * k + Math.sin(an) * 6 * k, k * 0.85, () => S.fish(c, t + i, '#ff8a3d', true), Math.sin(an) > 0 ? -1 : 1);
-      }
-    }
-    if (this.school && animals.includes('sardine')) {
-      const m = this.school;
-      for (let i = 0; i < 8; i++) {
-        const ox = Math.cos(i * 2.4) * (10 + (i % 3) * 5) * k + Math.sin(t * 1.5 + i) * 3 * k;
-        const oy = Math.sin(i * 1.7) * 9 * k + Math.cos(t * 1.2 + i) * 2 * k;
-        this.at(m.x + ox, m.y + oy, k * 0.6, () => S.fish(c, t + i, '#e6f3f8'), m.dir);
-      }
-    }
-    if (this.turtleM && animals.includes('turtle')) this.at(this.turtleM.x, this.turtleM.y, k, () => S.turtle(c, t), this.turtleM.dir);
-    if (this.mantaM && animals.includes('manta')) {
-      c.globalAlpha = 0.75;
-      this.at(this.mantaM.x, this.mantaM.y, k * 1.25, () => S.manta(c, t), this.mantaM.dir);
-    }
-    for (const m of this.units.robot) this.at(m.x, m.y, k * 0.95, () => S.robot(c, t + m.ph), m.dir);
-    c.restore();
-
-    // --- surface: wave dashes and sparkles
-    c.lineCap = 'round';
-    for (const w of this.waves) {
-      const al = (0.1 + 0.2 * r) * (0.5 + 0.5 * Math.sin(t * 0.9 + w.ph));
-      const x = w.x + Math.sin(t * 0.35 + w.ph) * 7 * k;
-      const L = 9 * k * w.s;
-      c.beginPath();
-      c.moveTo(x - L, w.y - L * 0.5);
-      c.quadraticCurveTo(x, w.y - 1.5 * k, x + L, w.y + L * 0.5);
-      c.strokeStyle = `rgba(255,255,255,${al})`;
-      c.lineWidth = 1.4 * k;
-      c.stroke();
-    }
-    if (r > 0.3) {
-      for (const sp of this.sparkles) {
-        const al = Math.max(0, Math.sin(t * 2.2 + sp.ph)) * Math.min(1, (r - 0.3) * 1.6);
-        if (al < 0.05) continue;
-        const s = 2.6 * k * sp.s;
-        c.fillStyle = `rgba(255,255,255,${al})`;
-        c.beginPath();
-        c.moveTo(sp.x, sp.y - s);
-        c.quadraticCurveTo(sp.x, sp.y, sp.x + s, sp.y);
-        c.quadraticCurveTo(sp.x, sp.y, sp.x, sp.y + s);
-        c.quadraticCurveTo(sp.x, sp.y, sp.x - s, sp.y);
-        c.quadraticCurveTo(sp.x, sp.y, sp.x, sp.y - s);
-        c.fill();
-      }
-    }
-
-    // whale far offshore
-    if (animals.includes('whale')) {
-      const cyc = (t % 16) / 16;
-      const up = smooth(cyc / 0.12) * (1 - smooth((cyc - 0.55) / 0.12));
-      const spout = cyc > 0.14 && cyc < 0.3 ? 1 : 0;
-      this.at(W * 0.74, H * 0.075, k * 0.9, () => S.whale(c, t, up, spout));
-    }
+    c.fillRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
 
     // --- sand
-    this.shorePath(0, 1.5 * k);
-    c.lineTo(W + 12, H + 12);
-    c.lineTo(-12, H + 12);
+    const step = Math.max(4, 8 / z);
+    const shore = (off: number, wob: number) => {
+      c.beginPath();
+      let first = true;
+      for (let x = vx0 - step; x <= vx1 + step; x += step) {
+        const y = shoreY(x) + off + Math.sin(x * 0.05 + t * 1.4) * wob;
+        if (first) { c.moveTo(x, y); first = false; } else c.lineTo(x, y);
+      }
+    };
+    shore(0, 1.2);
+    c.lineTo(vx1 + step, vy1 + 10);
+    c.lineTo(vx0 - step, vy1 + 10);
     c.closePath();
-    const sg = c.createLinearGradient(W * 0.5, this.shoreY(W * 0.5), W * 0.25, H);
-    sg.addColorStop(0, S.mix('#c9bd9c', '#ecd9a4', r));
-    sg.addColorStop(0.25, S.mix('#d2c7a8', '#f7e6b8', r));
-    sg.addColorStop(1, S.mix('#cbbf9f', '#fbeec6', r));
+    const sg = c.createLinearGradient(0, shoreY(WORLD_W / 2), 0, WORLD_H);
+    sg.addColorStop(0, '#f1dca5');
+    sg.addColorStop(0.15, '#f7e6b8');
+    sg.addColorStop(1, '#fbeec6');
     c.fillStyle = sg;
     c.fill();
-    // wet sand + foam
-    this.shorePath(5 * k, 1.5 * k);
-    c.strokeStyle = 'rgba(170,140,95,0.28)';
-    c.lineWidth = 11 * k;
+    shore(4, 1.2);
+    c.strokeStyle = 'rgba(190,150,95,0.3)';
+    c.lineWidth = 7;
     c.stroke();
-    const foam = S.mix('#d6d2c0', '#ffffff', r);
-    this.shorePath(-1 * k + Math.sin(t * 1.1) * 3 * k, 2 * k);
-    c.strokeStyle = foam;
-    c.globalAlpha = 0.92;
-    c.lineWidth = 3.6 * k;
-    c.stroke();
-    this.shorePath(-9 * k + Math.sin(t * 1.1 + 1.2) * 3.5 * k, 2.5 * k);
-    c.globalAlpha = 0.4;
-    c.lineWidth = 2 * k;
-    c.stroke();
-    c.globalAlpha = 1;
+    c.lineCap = 'round';
 
-    for (const p of this.pebbles) S.ell(c, p.x, p.y, 2.2 * k * p.s, 1.3 * k * p.s, ['rgba(160,135,95,0.35)', 'rgba(255,255,255,0.45)', 'rgba(140,150,150,0.3)'][p.kind]);
-    if (r < 0.42) {
-      const al = 0.22 * (1 - r / 0.42);
-      for (const st of this.stains) S.ell(c, st.x, st.y, 20 * k * st.s, 8 * k * st.s, `rgba(70,62,50,${al})`);
+    // --- decoration under the dirt
+    for (const d of DECOR) {
+      if (d.x < vx0 - 20 || d.x > vx1 + 20 || d.y < vy0 - 20 || d.y > vy1 + 20) continue;
+      this.drawDecor(d);
     }
-    if (animals.includes('starfish')) this.at(this.starSpots[0].x, this.starSpots[0].y, k * 0.95, () => S.starfish(c, t + 2));
 
-    // --- everything standing on the world, sorted by depth
+    // --- dirt: the cell grid is the mask (soft edges), a detailed texture of grime and debris fills it
+    {
+      const b = this.buf;
+      const bc = this.bctx;
+      if (b.width !== this.cv.width || b.height !== this.cv.height) { b.width = this.cv.width; b.height = this.cv.height; }
+      bc.setTransform(1, 0, 0, 1, 0, 0);
+      bc.globalCompositeOperation = 'source-over';
+      bc.clearRect(0, 0, b.width, b.height);
+      bc.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - this.camX * z), dpr * (H / 2 - this.camY * z));
+      bc.imageSmoothingEnabled = true;
+      const gx0 = Math.max(0, Math.floor(vx0 / CELL) - 1);
+      const gy0 = Math.max(0, Math.floor(vy0 / CELL) - 1);
+      const gx1 = Math.min(GW, Math.ceil(vx1 / CELL) + 1);
+      const gy1 = Math.min(GH, Math.ceil(vy1 / CELL) + 1);
+      if (gx1 > gx0 && gy1 > gy0) bc.drawImage(this.dirtCv, gx0, gy0, gx1 - gx0, gy1 - gy0, gx0 * CELL, gy0 * CELL, (gx1 - gx0) * CELL, (gy1 - gy0) * CELL);
+      bc.globalCompositeOperation = 'source-atop';
+      const half = (edgeY: number, pat: CanvasPattern) => {
+        bc.save();
+        bc.beginPath();
+        bc.moveTo(vx0 - 10, edgeY);
+        for (let x = vx0 - 10; x <= vx1 + step + 10; x += step) bc.lineTo(x, shoreY(x));
+        bc.lineTo(vx1 + step + 10, edgeY);
+        bc.closePath();
+        bc.clip();
+        bc.fillStyle = pat;
+        bc.fillRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
+        bc.restore();
+      };
+      half(vy0 - 10, this.seaPat);
+      half(vy1 + 10, this.landPat);
+      c.save();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.drawImage(b, 0, 0);
+      c.restore();
+    }
+
+    // foam on top of the dirt so the shoreline always reads
+    shore(-1, 2);
+    c.strokeStyle = 'rgba(255,255,255,0.85)';
+    c.lineWidth = 2.4;
+    c.stroke();
+    shore(-7 + Math.sin(t * 1.1) * 2, 2.5);
+    c.strokeStyle = 'rgba(255,255,255,0.4)';
+    c.lineWidth = 1.5;
+    c.stroke();
+
+    // --- locked sectors: dimmed, with a rope fence along the border of the open area
+    const sc0 = Math.max(0, Math.floor(vx0 / SECTOR));
+    const sc1 = Math.min(SCOLS - 1, Math.floor(vx1 / SECTOR));
+    const sr0 = Math.max(0, Math.floor(vy0 / SECTOR));
+    const sr1 = Math.min(SROWS - 1, Math.floor(vy1 / SECTOR));
+    for (let row = sr0; row <= sr1; row++) {
+      for (let col = sc0; col <= sc1; col++) {
+        const id = row * SCOLS + col;
+        if (this.f.open[id]) continue;
+        c.fillStyle = 'rgba(28,46,56,0.38)';
+        c.fillRect(col * SECTOR, row * SECTOR, SECTOR, SECTOR);
+      }
+    }
+    c.setLineDash([6 * px, 5 * px]);
+    c.lineWidth = 2.2 * px;
+    c.strokeStyle = 'rgba(255,240,210,0.9)';
+    for (let row = sr0; row <= sr1; row++) {
+      for (let col = sc0; col <= sc1; col++) {
+        const id = row * SCOLS + col;
+        if (!this.f.open[id]) continue;
+        const x = col * SECTOR;
+        const y = row * SECTOR;
+        const edge = (nid: number, inside: boolean, x0: number, y0: number, x1: number, y1: number) => {
+          if (inside && this.f.open[nid]) return;
+          c.beginPath();
+          c.moveTo(x0, y0);
+          c.lineTo(x1, y1);
+          c.stroke();
+        };
+        edge(id - SCOLS, row > 0, x, y, x + SECTOR, y);
+        edge(id + SCOLS, row < SROWS - 1, x, y + SECTOR, x + SECTOR, y + SECTOR);
+        edge(id - 1, col > 0, x, y, x, y + SECTOR);
+        edge(id + 1, col < SCOLS - 1, x + SECTOR, y, x + SECTOR, y + SECTOR);
+      }
+    }
+    c.setLineDash([]);
+
+    // --- things standing in the world, sorted by depth
     const items: { y: number; d: () => void }[] = [];
     const add = (y: number, d: () => void) => items.push({ y, d });
+    const inView = (x: number, y: number, m: number) => x > vx0 - m && x < vx1 + m && y > vy0 - m && y < vy1 + m;
 
-    add(this.pierPos.y - 14 * k, () => this.at(this.pierPos.x, this.pierPos.y, k, () => S.pier(c, 62)));
-    add(this.station.y, () => this.at(this.station.x, this.station.y, k * 1.05, () => S.recycler(c, state.recycler, t)));
-    add(this.store.y, () => this.at(this.store.x, this.store.y, k, () => S.storage(c, state.waste / storageCap(state))));
-
-    for (const p of this.palms) {
-      const g = p.at === 0 ? 1 : smooth((r - p.at) / 0.1);
-      if (g <= 0) continue;
-      const health = p.at === 0 ? smooth((r - 0.15) / 0.35) : 1;
-      add(p.y, () => this.at(p.x, p.y, k * p.s * g, () => S.palm(c, t + p.ph, health), p.kind % 2 ? -1 : 1));
+    for (let i = 0; i < LITTER.length; i++) {
+      if (this.f.picked[i]) continue;
+      const l = LITTER[i]!;
+      if (!inView(l.x, l.y, 40)) continue;
+      add(l.y, () => this.drawLitter(i));
     }
-    for (const p of this.plants) {
-      const g = smooth((r - p.at) / 0.08);
-      if (g > 0) add(p.y, () => this.at(p.x, p.y, k * p.s * g, () => S.tuft(c, t + p.ph, p.kind)));
+    for (const p of PALMS) {
+      if (!inView(p.x, p.y, 90)) continue;
+      const health = s.done.includes(p.kind) ? 1 : 0.15 + 0.7 * this.f.sectorClean(p.kind);
+      add(p.y, () => this.at(p.x, p.y, p.s, () => S.palm(c, t + p.ph, health), p.kind % 2 ? -1 : 1));
     }
-    for (const tr of this.trash) {
-      add(tr.y, () => {
-        const bobY = tr.water ? Math.sin(t * 2 + tr.ph) * 1.6 * k : 0;
-        if (tr.water) {
-          c.beginPath();
-          c.ellipse(tr.x, tr.y + 1 * k, (9 + Math.sin(t * 2 + tr.ph) * 1.5) * k, 3.4 * k, 0, 0, TAU);
-          c.strokeStyle = 'rgba(255,255,255,0.55)';
-          c.lineWidth = 1.1 * k;
-          c.stroke();
-        } else S.ell(c, tr.x, tr.y + 0.5 * k, 8 * k, 2.6 * k, 'rgba(60,50,40,0.2)');
-        c.save();
-        c.translate(tr.x, tr.y + bobY);
-        const s = k * 1.3 * (0.4 + 0.6 * smooth(tr.age));
-        c.scale(s, s);
-        c.rotate(tr.rot + (tr.water ? Math.sin(t * 1.5 + tr.ph) * 0.12 : 0));
-        c.globalAlpha = smooth(tr.age);
-        S.trash(c, tr.kind);
-        c.restore();
-      });
+    for (const h of this.helpers) {
+      if (!inView(h.x, h.y, 30)) continue;
+      const hs = Math.max(0.35, sim.helperRadius(s) / 9);
+      if (h.sea) add(h.y, () => this.at(h.x, h.y + Math.sin(t * 2 + h.ph) * 0.6, hs, () => S.floater(c, t + h.ph)));
+      else add(h.y, () => this.at(h.x, h.y, hs * 0.8, () => S.robot(c, t + h.ph), h.dir));
     }
-    if (this.bottle) {
-      const b = this.bottle;
-      const fade = Math.min(1, b.age / 0.8, (BOTTLE_LIFE - b.age) / 3);
-      add(b.y, () => {
-        c.save();
-        c.globalAlpha = Math.max(0, fade);
-        c.beginPath();
-        c.ellipse(b.x, b.y + 1 * k, (12 + Math.sin(t * 2 + b.ph) * 2) * k, 4.2 * k, 0, 0, TAU);
-        c.strokeStyle = 'rgba(255,255,255,0.7)';
-        c.lineWidth = 1.2 * k;
-        c.stroke();
-        c.translate(b.x, b.y + Math.sin(t * 2 + b.ph) * 2 * k);
-        c.scale(k * 1.35, k * 1.35);
-        S.bottleNote(c, t);
-        c.restore();
-      });
+    for (const cr of this.critters) {
+      if (!inView(cr.x, cr.y, 30)) continue;
+      add(cr.y, () => this.drawCritter(cr));
     }
-    this.units.worker.forEach((m, i) => add(m.y, () => this.at(m.x, m.y, k * 0.9, () => S.person(c, t + m.ph, { shirt: WORKER_SHIRTS[i % 6], hat: '#fff3c4', walk: m.moving, tool: true }), m.dir)));
-    for (const m of this.units.cleaner) add(m.y, () => this.at(m.x, m.y, k * 0.95, () => S.cleaner(c, t), -m.dir));
-    for (const m of this.units.boat) add(m.y, () => this.at(m.x, m.y + Math.sin(t * 2 + m.ph) * 1.2 * k, k * 0.95, () => S.boat(c, t + m.ph), m.dir));
-    for (const m of this.units.floater) add(m.y, () => this.at(m.x, m.y + Math.sin(t * 1.6 + m.ph) * 1.5 * k, k, () => S.floater(c, t + m.ph)));
-    for (const m of this.units.vessel) add(m.y, () => this.at(m.x, m.y + Math.sin(t * 1.2 + m.ph) * 1 * k, k * 0.9, () => S.vessel(c, t + m.ph), m.dir));
-    if (animals.includes('crab')) for (const m of this.crabs) add(m.y, () => this.at(m.x, m.y, k * 0.85, () => S.crab(c, m.moving ? t : 0)));
-    if (animals.includes('sandpiper')) for (const m of this.pipers) add(m.y, () => this.at(m.x, m.y, k * 0.85, () => S.sandpiper(c, t, m.moving), m.dir));
-    {
-      const p = this.player;
-      const water = sim.canSail(state) && this.isWater(p.x, p.y);
-      const reach = sim.sweepRadius(state, water) * k;
-      // sweep area under the player's feet
-      c.save();
-      c.beginPath();
-      c.ellipse(p.x, p.y, reach, reach / 1.6, 0, 0, TAU);
-      c.fillStyle = 'rgba(255,255,255,0.10)';
-      c.fill();
-      c.setLineDash([5 * k, 5 * k]);
-      c.lineDashOffset = -t * 8;
-      c.strokeStyle = 'rgba(255,255,255,0.5)';
-      c.lineWidth = 1.4 * k;
-      c.stroke();
-      c.restore();
-      if (water) add(p.y, () => this.at(p.x, p.y + Math.sin(t * 2) * 1.2 * k, k * 1.05, () => S.boat(c, t), p.dir));
-      else add(p.y, () => this.at(p.x, p.y, k * 1.12, () => S.person(c, t, { shirt: '#2fb7ae', hat: '#ffd98a', walk: p.moving, tool: true }), p.dir));
-    }
+    add(s.py, () => this.drawPlayer());
     items.sort((a, b) => a.y - b.y);
     for (const it of items) it.d();
 
-    // dolphin leaping
-    if (animals.includes('dolphin') && this.dolphinJump.t < 1.0) {
-      const j = this.dolphinJump;
-      const u = j.t / 1.0;
-      const x = j.x + (u - 0.5) * 34 * k * j.dir;
-      const y = j.y - Math.sin(u * Math.PI) * 26 * k;
-      c.save();
-      c.translate(x, y);
-      c.scale(k * j.dir, k);
-      c.rotate((u - 0.5) * 1.9);
-      S.dolphin(c);
-      c.restore();
+    // litter flying into the bag
+    for (const fl of this.flyers) {
+      const l = LITTER[fl.i]!;
+      const u = fl.t;
+      const x = fl.x + (s.px - fl.x) * u;
+      const y = fl.y + (s.py - fl.y) * u - Math.sin(u * Math.PI) * 14;
+      const sc = (LITTER_RADIUS[l.size]! / 8) * (1 - u * 0.6);
+      this.at(x, y, sc, () => { c.rotate(u * 6); S.trash(c, l.kind); });
+    }
+    for (const p of this.parts) {
+      const u = p.t / p.life;
+      S.ell(c, p.x, p.y, p.r * (1 - u * 0.5), p.r * (1 - u * 0.5), `rgba(${p.color},${1 - u})`);
     }
 
-    // --- in the air
-    if (animals.includes('gull')) {
+    // seagulls overhead once they are back
+    if (s.animals.includes('gull')) {
       for (let i = 0; i < 2; i++) {
-        const an = t * (0.32 + i * 0.07) + i * 2.6;
-        const cx = W * (0.42 + i * 0.16);
-        const cy = H * (0.3 + i * 0.16);
-        const rx = W * (0.3 - i * 0.06);
-        const ry = H * (0.13 + i * 0.03);
-        const x = cx + Math.cos(an) * rx;
-        const y = cy + Math.sin(an) * ry;
-        S.ell(c, x + 10 * k, y + 34 * k, 9 * k, 3 * k, 'rgba(30,60,70,0.12)');
+        const an = t * (0.25 + i * 0.06) + i * 2.6;
+        const span = (vx1 - vx0) * 0.4;
+        const x = this.camX + Math.cos(an) * span;
+        const y = this.camY + Math.sin(an) * span * 0.7;
+        const gs = Math.max(0.6, 14 * px);
         c.save();
         c.translate(x, y);
         c.rotate(an + Math.PI);
-        c.scale(k * 0.85, k * 0.85);
+        c.scale(gs, gs);
         S.gull(c, t + i);
         c.restore();
       }
     }
-    for (const m of this.units.drone) {
-      const hov = Math.sin(t * 3 + m.ph) * 2 * k;
-      S.ell(c, m.x, m.y + 4 * k, 8 * k, 2.6 * k, 'rgba(30,60,70,0.16)');
-      this.at(m.x, m.y - 26 * k + hov, k * 0.95, () => S.drone(c, t + m.ph));
-    }
 
-    // --- flying trash, particles, popups
-    for (const f of this.flies) {
-      const u = f.t;
-      const x = f.x0 + (f.x1 - f.x0) * u;
-      const y = f.y0 + (f.y1 - f.y0) * u - Math.sin(u * Math.PI) * 60 * k;
-      c.save();
-      c.translate(x, y);
-      c.rotate(u * 5);
-      c.scale(k * 1.1 * (1 - u * 0.4), k * 1.1 * (1 - u * 0.4));
-      S.trash(c, f.kind);
-      c.restore();
-    }
-    for (const p of this.parts) {
-      const u = p.t / p.life;
-      if (p.ring) {
-        c.beginPath();
-        c.ellipse(p.x, p.y, p.r * (1 + u * 2.2), p.r * (1 + u * 2.2) * 0.45, 0, 0, TAU);
-        c.strokeStyle = `rgba(${p.color},${0.6 * (1 - u)})`;
-        c.lineWidth = 1.5 * k;
-        c.stroke();
-      } else S.ell(c, p.x, p.y, p.r * (1 - u * 0.5), p.r * (1 - u * 0.5), `rgba(${p.color},${1 - u})`);
-    }
-
-    this.drawSectors();
-
-    // pollution haze lifts as the beach recovers; warm sunlight grows
-    if (r < 0.98) {
-      c.fillStyle = `rgba(118,122,100,${0.2 * Math.pow(1 - r, 1.4)})`;
-      c.fillRect(0, 0, W, H);
-    }
-    const sun = c.createRadialGradient(W * 0.05, 0, 0, W * 0.05, 0, H * 0.9);
-    sun.addColorStop(0, `rgba(255,244,200,${0.1 + 0.2 * r})`);
-    sun.addColorStop(1, 'rgba(255,244,200,0)');
-    c.fillStyle = sun;
-    c.fillRect(0, 0, W, H);
-
+    // --- screen space: sector signs, popups, joystick
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawSigns(sc0, sc1, sr0, sr1);
     c.textAlign = 'center';
     c.textBaseline = 'middle';
     c.lineJoin = 'round';
     for (const p of this.popups) {
-      const u = p.t / p.life;
+      const u = p.t / 1.1;
+      const sp = this.toScreen(p.x, p.y);
       c.globalAlpha = u < 0.7 ? 1 : 1 - (u - 0.7) / 0.3;
-      c.font = `800 ${Math.round(p.size * k * (1 + 0.25 * Math.max(0, 1 - u * 6)))}px ui-rounded, "Nunito", system-ui, sans-serif`;
-      const y = p.y - u * 30 * k;
-      c.strokeStyle = 'rgba(30,70,85,0.55)';
-      c.lineWidth = 3 * k;
-      c.strokeText(p.text, p.x, y);
+      c.font = `800 ${p.size}px ui-rounded, "Nunito", system-ui, sans-serif`;
+      const y = sp.y - u * 26;
+      c.strokeStyle = 'rgba(30,60,70,0.6)';
+      c.lineWidth = 3;
+      c.strokeText(p.text, sp.x, y);
       c.fillStyle = p.color;
-      c.fillText(p.text, p.x, y);
+      c.fillText(p.text, sp.x, y);
     }
     c.globalAlpha = 1;
+    if (this.stick?.dragged) {
+      const st = this.stick;
+      const dx = st.x - st.ox;
+      const dy = st.y - st.oy;
+      const d = Math.hypot(dx, dy);
+      const k = d > 48 ? 48 / d : 1;
+      c.beginPath();
+      c.arc(st.ox, st.oy, 48, 0, TAU);
+      c.fillStyle = 'rgba(255,255,255,0.16)';
+      c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.5)';
+      c.lineWidth = 2;
+      c.stroke();
+      c.beginPath();
+      c.arc(st.ox + dx * k, st.oy + dy * k, 20, 0, TAU);
+      c.fillStyle = 'rgba(255,255,255,0.75)';
+      c.fill();
+    }
+  }
+
+  private drawDecor(d: Decor): void {
+    const c = this.c;
+    switch (d.kind) {
+      case 0: // shell
+        S.ell(c, d.x, d.y, 2.4 * d.s, 1.8 * d.s, '#ffd6c9');
+        S.ell(c, d.x - 0.5, d.y - 0.4, 1.2 * d.s, 0.8 * d.s, '#fff3ee');
+        break;
+      case 1: // pebble
+        S.ell(c, d.x, d.y, 2.2 * d.s, 1.5 * d.s, 'rgba(160,140,110,0.55)');
+        break;
+      case 2: // dune grass
+        this.at(d.x, d.y, 0.6 * d.s, () => S.tuft(c, this.t + d.ph, 0));
+        break;
+      case 3: case 4: case 5: // coral in deeper water
+        this.at(d.x, d.y, 0.8 * d.s, () => S.coral(c, d.kind));
+        break;
+      case 6: // seagrass
+        this.at(d.x, d.y, 0.7 * d.s, () => S.seagrass(c, this.t + d.ph));
+        break;
+      default: // rock
+        this.at(d.x, d.y, 0.7 * d.s, () => S.rock(c));
+    }
+  }
+
+  private drawLitter(i: number): void {
+    const c = this.c;
+    const l = LITTER[i]!;
+    const lr = LITTER_RADIUS[l.size]!;
+    const sc = lr / 8;
+    const bob = l.water ? Math.sin(this.t * 2 + i) * 0.8 : 0;
+    if (l.water) {
+      c.beginPath();
+      c.ellipse(l.x, l.y + 0.5, lr * 1.1, lr * 0.4, 0, 0, TAU);
+      c.strokeStyle = 'rgba(255,255,255,0.5)';
+      c.lineWidth = 0.8;
+      c.stroke();
+    } else S.ell(c, l.x, l.y + 0.5, lr, lr * 0.35, 'rgba(50,40,30,0.25)');
+    this.at(l.x, l.y + bob, sc, () => { c.rotate(l.rot); S.trash(c, l.kind); });
+    // too big for the current tool: a small lock badge when you are near
+    if (this.s.tool < LITTER_TIER[l.size]!) {
+      const d = Math.hypot(l.x - this.s.px, l.y - this.s.py);
+      if (d < sim.toolRadius(this.s) * 4 + 40) {
+        this.at(l.x, l.y - lr * 1.6, 1 / this.zoom, () => {
+          c.font = '800 11px ui-rounded, "Nunito", system-ui, sans-serif';
+          c.textAlign = 'center';
+          c.textBaseline = 'middle';
+          const text = `🔒 ${TOOLS[LITTER_TIER[l.size]!]!.name}`;
+          const w = c.measureText(text).width + 12;
+          c.fillStyle = 'rgba(20,50,62,0.75)';
+          c.beginPath();
+          c.roundRect(-w / 2, -9, w, 18, 9);
+          c.fill();
+          c.fillStyle = '#fff';
+          c.fillText(text, 0, 0.5);
+        });
+      }
+    }
+  }
+
+  private drawPlayer(): void {
+    const { c, s, t } = this;
+    const r = sim.toolRadius(s);
+    const onWater = s.boat && isWater(s.px, s.py);
+    // reach ring
+    c.beginPath();
+    c.arc(s.px, s.py, r, 0, TAU);
+    c.fillStyle = 'rgba(255,255,255,0.12)';
+    c.fill();
+    c.setLineDash([4 / this.zoom, 4 / this.zoom]);
+    c.lineDashOffset = (-t * 10) / this.zoom;
+    c.strokeStyle = 'rgba(255,255,255,0.75)';
+    c.lineWidth = 1.5 / this.zoom;
+    c.stroke();
+    c.setLineDash([]);
+    const mr = sim.magnetRange(s);
+    if (mr > 0) {
+      c.beginPath();
+      c.arc(s.px, s.py, r + mr, 0, TAU);
+      c.strokeStyle = 'rgba(255,214,110,0.35)';
+      c.stroke();
+    }
+    const look = sim.tool(s).look;
+    if (onWater) {
+      this.at(s.px, s.py + Math.sin(t * 2) * 0.5, Math.max(0.45, r / 15), () => S.boat(c, t), this.dir);
+    } else if (look === 'machine') {
+      this.at(s.px, s.py + r * 0.35, r / 13, () => S.cleaner(c, this.moving ? t : 0), -this.dir);
+    } else {
+      // tool head in front, person behind it
+      const hs = Math.max(0.5, r / 6);
+      const head = ['#8a6a4a', '#c0392b', '#2fb7ae', '#f2a03d'][s.tool] ?? '#888';
+      c.save();
+      c.translate(s.px + this.dir * r * 0.15, s.py + r * 0.45);
+      const w = r * 1.5;
+      S.rr(c, -w / 2, -r * 0.12, w, r * 0.24, r * 0.1, head);
+      for (let i = 0; i < 6; i++) S.rr(c, -w / 2 + (i / 5) * (w - r * 0.1), r * 0.08, r * 0.08, r * 0.14, 0, 'rgba(60,40,20,0.6)');
+      c.restore();
+      this.at(s.px, s.py, hs * 0.55, () => S.person(c, t, { shirt: '#2fb7ae', hat: '#ffd98a', walk: this.moving, tool: true }), this.dir);
+    }
+  }
+
+  private drawCritter(cr: Critter): void {
+    const { c, t } = this;
+    const sc = 0.55;
+    switch (cr.id) {
+      case 'crab': this.at(cr.x, cr.y, sc, () => S.crab(c, t + cr.ph)); break;
+      case 'sandpiper': this.at(cr.x, cr.y, sc, () => S.sandpiper(c, t, true), cr.dir); break;
+      case 'starfish': this.at(cr.x, cr.y, sc, () => S.starfish(c, t + cr.ph)); break;
+      case 'sardine':
+        for (let i = 0; i < 6; i++) this.at(cr.x + Math.cos(i * 2.4) * 7, cr.y + Math.sin(i * 1.7) * 5, 0.4, () => S.fish(c, t + i, '#e6f3f8'), cr.dir);
+        break;
+      case 'clownfish': this.at(cr.x, cr.y, sc, () => S.fish(c, t, '#ff8a3d', true), cr.dir); break;
+      case 'seahorse': this.at(cr.x, cr.y, sc, () => S.seahorse(c, t)); break;
+      case 'turtle': this.at(cr.x, cr.y, 0.7, () => S.turtle(c, t), cr.dir); break;
+      case 'octopus': this.at(cr.x, cr.y, sc, () => S.octopus(c, t)); break;
+      case 'dolphin': this.at(cr.x, cr.y, 0.8, () => S.dolphin(c), cr.dir); break;
+      case 'manta': c.globalAlpha = 0.8; this.at(cr.x, cr.y, 0.9, () => S.manta(c, t), cr.dir); c.globalAlpha = 1; break;
+    }
+  }
+
+  /** Price signs over the locked sectors you can open next. Drawn in screen space so they stay readable. */
+  private drawSigns(sc0: number, sc1: number, sr0: number, sr1: number): void {
+    const c = this.c;
+    const z = this.zoom;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    const vx0 = this.camX - this.W / 2 / z;
+    const vx1 = this.camX + this.W / 2 / z;
+    const vy0 = this.camY - this.H / 2 / z;
+    const vy1 = this.camY + this.H / 2 / z;
+    for (let row = sr0; row <= sr1; row++) {
+      for (let col = sc0; col <= sc1; col++) {
+        const id = row * SCOLS + col;
+        if (this.f.open[id]) continue;
+        const block = sim.sectorBlock(this.s, id);
+        if (block === 'far') continue;
+        const text = block === 'boat' ? '⛵ Needs the boat' : `🔒 Open · ${fmtShort(sim.sectorCost(id))}`;
+        c.font = '800 13px ui-rounded, "Nunito", system-ui, sans-serif';
+        const w = c.measureText(text).width + 22;
+        // the part of the sector that is on screen; skip the sign if it would not fit there
+        const a = this.toScreen(Math.max(col * SECTOR, vx0), Math.max(row * SECTOR, vy0));
+        const b = this.toScreen(Math.min((col + 1) * SECTOR, vx1), Math.min((row + 1) * SECTOR, vy1));
+        const top = Math.max(a.y, 8);
+        const bottom = Math.min(b.y, this.H - 64); // keep clear of the goal chip
+        if (b.x - a.x < w + 12 || bottom - top < 40) continue;
+        const centre = this.toScreen((col + 0.5) * SECTOR, (row + 0.5) * SECTOR);
+        const p = { x: clamp(centre.x, a.x + w / 2 + 6, b.x - w / 2 - 6), y: clamp(centre.y, top + 20, bottom - 20) };
+        // stay out from under the minimap
+        if (p.x + w / 2 > this.W - 84 && p.y < 170) {
+          if (bottom - 20 < 170) continue;
+          p.y = 170;
+        }
+        const afford = block === null;
+        c.fillStyle = afford ? 'rgba(255,214,90,0.96)' : 'rgba(255,250,240,0.92)';
+        c.beginPath();
+        c.roundRect(p.x - w / 2, p.y - 15, w, 30, 15);
+        c.fill();
+        c.strokeStyle = afford ? '#d99a1c' : 'rgba(35,64,77,0.25)';
+        c.lineWidth = 1.5;
+        c.stroke();
+        c.fillStyle = afford ? '#5a3d00' : '#23404d';
+        c.fillText(text, p.x, p.y + 0.5);
+      }
+    }
+  }
+
+  // ---- minimap ----------------------------------------------------------------
+
+  /** Draws the whole coast into a small canvas: dirt, locked sectors, the player and the camera view. */
+  drawMap(cv: HTMLCanvasElement, detail = false): void {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = cv.clientWidth;
+    const h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const c = cv.getContext('2d')!;
+    c.setTransform((dpr * w) / WORLD_W, 0, 0, (dpr * h) / WORLD_H, 0, 0);
+    c.fillStyle = '#35b3cf';
+    c.fillRect(0, 0, WORLD_W, WORLD_H);
+    c.beginPath();
+    c.moveTo(0, shoreY(0));
+    for (let x = 0; x <= WORLD_W; x += 40) c.lineTo(x, shoreY(x));
+    c.lineTo(WORLD_W, WORLD_H);
+    c.lineTo(0, WORLD_H);
+    c.closePath();
+    c.fillStyle = '#f5e2b0';
+    c.fill();
+    c.imageSmoothingEnabled = true;
+    c.drawImage(this.dirtCv, 0, 0, WORLD_W, WORLD_H);
+    for (let id = 0; id < SECTOR_N; id++) {
+      if (this.f.open[id]) continue;
+      const x = (id % SCOLS) * SECTOR;
+      const y = Math.floor(id / SCOLS) * SECTOR;
+      c.fillStyle = 'rgba(25,40,50,0.5)';
+      c.fillRect(x, y, SECTOR, SECTOR);
+      if (detail && sim.sectorBlock(this.s, id) === null) {
+        c.strokeStyle = '#ffd24a';
+        c.lineWidth = 18;
+        c.strokeRect(x + 12, y + 12, SECTOR - 24, SECTOR - 24);
+      }
+    }
+    if (detail) {
+      c.strokeStyle = 'rgba(255,255,255,0.35)';
+      c.lineWidth = 6;
+      for (let col = 1; col < SCOLS; col++) { c.beginPath(); c.moveTo(col * SECTOR, 0); c.lineTo(col * SECTOR, WORLD_H); c.stroke(); }
+      for (let row = 1; row < SROWS; row++) { c.beginPath(); c.moveTo(0, row * SECTOR); c.lineTo(WORLD_W, row * SECTOR); c.stroke(); }
+    }
+    const hw = this.W / 2 / this.zoom;
+    const hh = this.H / 2 / this.zoom;
+    c.strokeStyle = 'rgba(255,255,255,0.9)';
+    c.lineWidth = detail ? 10 : 22;
+    c.strokeRect(this.camX - hw, this.camY - hh, hw * 2, hh * 2);
+    c.fillStyle = '#ff5a4f';
+    c.beginPath();
+    c.arc(this.s.px, this.s.py, detail ? 30 : 60, 0, TAU);
+    c.fill();
+    c.strokeStyle = '#fff';
+    c.lineWidth = detail ? 10 : 18;
+    c.stroke();
+  }
+
+  /** Sector under a point of the map canvas. */
+  mapSector(cv: HTMLCanvasElement, x: number, y: number): number {
+    return sectorAt((x / cv.clientWidth) * WORLD_W, (y / cv.clientHeight) * WORLD_H);
+  }
+  /** A locked sector next to the open area. */
+  frontier(id: number): boolean {
+    return !this.f.open[id] && neighbours(id).some((n) => this.f.open[n]);
   }
 }
 
-function fmtShort(n: number): string {
+function clamp(v: number, lo: number, hi: number): number {
+  return lo > hi ? (lo + hi) / 2 : Math.max(lo, Math.min(hi, v));
+}
+
+export function fmtShort(n: number): string {
+  if (n < 10) return n.toFixed(1).replace(/\.0$/, '');
   if (n < 1000) return String(Math.floor(n));
   const u = ['K', 'M', 'B', 'T', 'Q'];
   let i = -1;

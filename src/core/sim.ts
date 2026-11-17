@@ -1,198 +1,125 @@
-// Pure game rules: no DOM, no timers. Used by the game loop, offline progress, tests and the balance tool.
+// Pure game rules: no DOM, no timers. Shared by the game loop, offline progress, tests and the balance tool.
+import { ANIMALS, BOAT_COST, GOALS, HELPERS, TOOLS, UPGRADES, type GoalDef, type HelperId, type UpgradeId } from './content.ts';
+import { DIRT_CELLS, LITTER_N, decodeBits, encodeBits, type GameState } from './state.ts';
 import {
-  ANIMALS, GOALS, SECTOR_COLS, SECTOR_COUNT, SECTOR_TRASH, MILESTONES, RECYCLERS, REEF_ROUTE_COST, RESEARCH, UNITS, UNIT_GROWTH, UPGRADES,
-  type GoalDef, type ResearchDef, type UnitId, type UpgradeId,
-} from './content.ts';
-import type { GameState } from './state.ts';
-
-// Restoration is logarithmic in waste cleaned: each quarter of the bar needs far more than the previous one,
-// which keeps pace with the exponential growth of the player's production.
-const K = 100;
-export const TARGET = 1e11;
-const LOG_T = Math.log(1 + TARGET / K);
+  CELL, CELLS_PER_SECTOR, DONE_FRACTION, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SEA_ROWS, SCOLS,
+  isSeaSector, isWaterCell, neighbours, ring, sectorOfCell, sectorRow,
+} from './world.ts';
 
 export type GameEvent =
   | { kind: 'animal'; id: string }
-  | { kind: 'milestone'; pct: number };
+  | { kind: 'sector'; id: number; bonus: number }
+  | { kind: 'complete' };
 
-export const has = (s: GameState, id: string): boolean => s.research.includes(id);
+// ---- the field: live dirt + litter --------------------------------------------
 
-export function rawPct(s: GameState): number {
-  return (100 * Math.log(1 + s.restorePts / K)) / LOG_T;
-}
-export function pct(s: GameState): number {
-  return Math.min(100, rawPct(s));
-}
+/** Runtime copy of the dirt grid and litter, with per-sector counters. Serialised into the save. */
+export class Field {
+  readonly dirt: Uint8Array;
+  readonly picked: Uint8Array;
+  readonly left = new Int32Array(SECTOR_N);
+  totalLeft = 0;
+  readonly open = new Uint8Array(SECTOR_N);
+  /** Called for every cell that becomes clean (the renderer repaints it). */
+  onCell: ((gx: number, gy: number) => void) | null = null;
 
-// ---- derived stats -------------------------------------------------------
-
-export function collectMult(s: GameState): number {
-  return (1 + 0.1 * s.upgrades.net) * (has(s, 'c5') ? 1.5 : 1);
-}
-
-export function unitMult(s: GameState, id: UnitId): number {
-  let m = collectMult(s);
-  if ((id === 'worker' || id === 'cleaner') && has(s, 'a1')) m *= 3;
-  if ((id === 'boat' || id === 'floater' || id === 'vessel') && has(s, 'c4')) m *= 2;
-  if ((id === 'drone' || id === 'robot') && has(s, 'a5')) m *= 3;
-  if (has(s, 'a4')) m *= 1 + 0.05 * Math.floor(totalUnits(s) / 10);
-  return m;
-}
-
-export function totalUnits(s: GameState): number {
-  let n = 0;
-  for (const u of UNITS) n += s.units[u.id];
-  return n;
-}
-
-/** Waste per second produced by a single unit of this type. */
-export function unitRate(s: GameState, id: UnitId): number {
-  const def = UNITS.find((u) => u.id === id)!;
-  return def.rate * unitMult(s, id);
-}
-
-/** Total automated waste per second. */
-export function autoRate(s: GameState): number {
-  let total = 0;
-  for (const u of UNITS) if (s.units[u.id] > 0) total += s.units[u.id] * u.rate * unitMult(s, u.id);
-  return total;
+  constructor(s: GameState) {
+    this.dirt = decodeBits(s.dirt, DIRT_CELLS, 1);
+    this.picked = decodeBits(s.litter, LITTER_N, 0);
+    for (let gy = 0; gy < GH; gy++) {
+      for (let gx = 0; gx < GW; gx++) {
+        if (this.dirt[gy * GW + gx]) { this.left[sectorOfCell(gx, gy)]!++; this.totalLeft++; }
+      }
+    }
+    this.syncOpen(s);
+  }
+  syncOpen(s: GameState): void {
+    this.open.fill(0);
+    for (const id of s.sectors) this.open[id] = 1;
+  }
+  store(s: GameState): void {
+    s.dirt = encodeBits(this.dirt);
+    s.litter = encodeBits(this.picked);
+  }
+  /** Fraction of a sector already clean, 0..1. */
+  sectorClean(id: number): number {
+    return 1 - this.left[id]! / CELLS_PER_SECTOR;
+  }
 }
 
-/** Waste collected from one ordinary piece of trash. */
-export function tapPower(s: GameState): number {
-  const g = s.upgrades.grabber;
-  let p = (1 + g) * Math.pow(2, Math.floor(g / 10));
-  p *= 1 + 0.1 * s.upgrades.bag;
-  p *= 1 + 0.2 * s.upgrades.sweeper;
-  if (has(s, 'c1')) p *= 2;
-  if (has(s, 'c2')) p *= 1.5;
-  return p * collectMult(s);
+/** Percent of the whole coast that is clean. */
+export function pct(f: Field): number {
+  return 100 * (1 - f.totalLeft / DIRT_CELLS);
 }
 
-/** Flat bonus added to a pick-up by Helping Hands. */
-export function tapBonus(s: GameState): number {
-  return has(s, 'c3') ? autoRate(s) * 1.5 : 0;
-}
+// ---- derived stats --------------------------------------------------------------
 
-export function storageCap(s: GameState): number {
-  return Math.round(80 * Math.pow(1.5, s.upgrades.bag) * (has(s, 'c5') ? 5 : 1));
-}
+export const tool = (s: GameState) => TOOLS[s.tool]!;
+export const toolRadius = (s: GameState): number => tool(s).radius;
 
-/** Waste per second the recycler can process. */
-export function throughput(s: GameState): number {
-  return RECYCLERS[s.recycler]!.throughput * (1 + 0.3 * s.upgrades.conveyor) * (has(s, 'a2') ? 2 : 1);
-}
-
-/** Coins per unit of recycled waste. */
-export function coinValue(s: GameState): number {
-  let v = RECYCLERS[s.recycler]!.value;
-  if (has(s, 'e2')) v *= 1 + pct(s) / 100;
-  if (has(s, 'e5')) v *= 1.5;
-  if (s.beachRewarded) v *= 1.5;
-  if (s.reefCharted) v *= 1.25;
-  return v;
-}
-
-export function restoreMult(s: GameState): number {
-  return (has(s, 'e1') ? 1.3 : 1) * (has(s, 'e4') ? 1.6 : 1);
-}
-export function repMult(s: GameState): number {
-  return (has(s, 'e3') ? 1.5 : 1) * (has(s, 'e5') ? 2 : 1);
-}
-export function offlineCapSeconds(s: GameState): number {
-  return (has(s, 'a3') ? 16 : 8) * 3600;
-}
-export function offlineEfficiency(s: GameState): number {
-  return has(s, 'a3') ? 1 : 0.5;
-}
-
-/** Waste actually being recycled per second right now. */
-export function recycleRate(s: GameState): number {
-  const thr = throughput(s);
-  return s.waste > 1 ? thr : Math.min(thr, autoRate(s));
-}
-export function coinsPerMinute(s: GameState): number {
-  return recycleRate(s) * coinValue(s) * 60;
-}
-export function wastePerMinute(s: GameState): number {
-  return autoRate(s) * 60;
-}
-/** True when collection outpaces recycling and storage is overflowing. */
-export function isBottlenecked(s: GameState): boolean {
-  return s.waste >= storageCap(s) * 0.98 && autoRate(s) > throughput(s);
-}
-
-// ---- sweeping & sectors --------------------------------------------------
-
-/** True while the player is out on the water in the boat. */
-export const canSail = (s: GameState): boolean => s.upgrades.boat >= 1;
-
-/** Sweep radius in design pixels (the scene scales it to the screen). */
-export function sweepRadius(s: GameState, onWater = false): number {
-  const r = 24 + 13 * s.upgrades.sweeper;
-  return onWater ? r * [1, 1, 1.3, 1.7][s.upgrades.boat]! : r;
-}
-/** Walking / sailing speed in design pixels per second. */
 export function moveSpeed(s: GameState, onWater = false): number {
-  const v = 80 * (1 + 0.4 * s.upgrades.boots);
-  return onWater ? v * [1, 0.9, 1.4, 1.9][s.upgrades.boat]! : v;
+  const v = 42 * tool(s).speed * (1 + 0.12 * s.upgrades.boots);
+  return onWater ? v * 0.95 : v;
+}
+export function coinMult(s: GameState): number {
+  return 1 + 0.15 * s.upgrades.sorting;
+}
+/** Base coins per dirt cell in a sector, before Sorting Skills. Further and wetter pays more. */
+export function cellBase(id: number): number {
+  return Math.pow(1.25, ring(id)) * (isSeaSector(id) ? 1.5 : 1);
+}
+export function cellValue(s: GameState, id: number): number {
+  return cellBase(id) * coinMult(s);
+}
+export function sectorValue(id: number): number {
+  return CELLS_PER_SECTOR * cellBase(id);
+}
+export function litterValue(s: GameState, i: number): number {
+  const l = LITTER[i]!;
+  return cellValue(s, l.sector) * [10, 50, 240, 1000][l.size]!;
+}
+/** Extra pick-up reach from the Trash Magnet, in world pixels. */
+export function magnetRange(s: GameState): number {
+  return s.upgrades.magnet * (5 + toolRadius(s) * 0.5);
+}
+export function helperRadius(s: GameState): number {
+  return 3 + toolRadius(s) * 0.25;
+}
+export const HELPER_SPEED = 26;
+/** Approximate cells per second a sweeper of this radius and speed clears while working. */
+export function sweepRate(radius: number, speed: number, efficiency = 0.6): number {
+  return (2 * radius * speed * efficiency) / (CELL * CELL);
+}
+export function playerRate(s: GameState): number {
+  return sweepRate(toolRadius(s), moveSpeed(s));
+}
+export function helperRate(s: GameState, id: HelperId): number {
+  return s.helpers[id] * sweepRate(helperRadius(s), HELPER_SPEED, 0.7);
 }
 
-export function sectorCost(s: GameState): number {
-  return Math.round(100 * Math.pow(2.1, Math.max(0, s.sectors.length - 2)));
+// ---- costs & purchases ------------------------------------------------------------
+
+export function nextTool(s: GameState) {
+  return TOOLS[s.tool + 1];
 }
-export type SectorBlock = 'owned' | 'far' | 'boat' | 'coins' | null;
-/** A sector can only be opened next to one you already own, so you can always walk (or sail) there. */
-export function nextToOpen(s: GameState, id: number): boolean {
-  return s.sectors.some((o) => Math.abs(o - id) === SECTOR_COLS || (Math.abs(o - id) === 1 && Math.floor(o / SECTOR_COLS) === Math.floor(id / SECTOR_COLS)));
+export function canBuyTool(s: GameState): boolean {
+  const t = nextTool(s);
+  return !!t && s.coins >= t.cost;
 }
-export function sectorBlock(s: GameState, id: number, sea: boolean): SectorBlock {
-  if (s.sectors.includes(id)) return 'owned';
-  if (!nextToOpen(s, id)) return 'far';
-  if (sea && !canSail(s)) return 'boat';
-  return s.coins >= sectorCost(s) ? null : 'coins';
-}
-export function openSector(s: GameState, id: number, sea: boolean): boolean {
-  if (sectorBlock(s, id, sea) !== null || s.sectors.length >= SECTOR_COUNT) return false;
-  s.coins -= sectorCost(s);
-  s.sectors.push(id);
-  s.sectorLeft[id] = SECTOR_TRASH;
+export function buyTool(s: GameState): boolean {
+  if (!canBuyTool(s)) return false;
+  s.coins -= nextTool(s)!.cost;
+  s.tool++;
   return true;
 }
-export interface SweepResult { reward: number; events: GameEvent[] }
-/** A piece of trash was swept up in this sector. Cleaning a sector completely pays a bonus. */
-export function sweptItem(s: GameState, sector: number, tide: boolean): SweepResult {
-  const none: SweepResult = { reward: 0, events: [] };
-  if (tide || !(sector in s.sectorLeft)) return none;
-  s.sectorLeft[sector] = Math.max(0, s.sectorLeft[sector]! - 1);
-  if (s.sectorLeft[sector] > 0 || s.sectorsCleared.includes(sector)) return none;
-  s.sectorsCleared.push(sector);
-  const reward = Math.max(60, Math.round(coinsPerMinute(s) * 2));
-  s.coins += reward;
-  s.totalCoins += reward;
-  s.restorePts += Math.max(150, s.restorePts * 0.04);
-  const events: GameEvent[] = [];
-  checkProgress(s, events);
-  return { reward, events };
-}
-
-// ---- costs & purchases ---------------------------------------------------
 
 export function upgradeCost(s: GameState, id: UpgradeId): number {
   const d = UPGRADES.find((u) => u.id === id)!;
   return Math.ceil(d.baseCost * Math.pow(d.growth, s.upgrades[id]));
 }
-export function unitCost(s: GameState, id: UnitId): number {
-  const d = UNITS.find((u) => u.id === id)!;
-  return Math.ceil(d.baseCost * Math.pow(UNIT_GROWTH, s.units[id]));
-}
-export function isUnlocked(s: GameState, unlockAt: number): boolean {
-  return pct(s) >= unlockAt;
-}
-
 export function canBuyUpgrade(s: GameState, id: UpgradeId): boolean {
   const d = UPGRADES.find((u) => u.id === id)!;
-  return isUnlocked(s, d.unlockAt) && s.upgrades[id] < d.max && s.coins >= upgradeCost(s, id);
+  return s.upgrades[id] < d.max && s.coins >= upgradeCost(s, id);
 }
 export function buyUpgrade(s: GameState, id: UpgradeId): boolean {
   if (!canBuyUpgrade(s, id)) return false;
@@ -201,187 +128,252 @@ export function buyUpgrade(s: GameState, id: UpgradeId): boolean {
   return true;
 }
 
-export function canBuyUnit(s: GameState, id: UnitId): boolean {
-  const d = UNITS.find((u) => u.id === id)!;
-  return isUnlocked(s, d.unlockAt) && s.coins >= unitCost(s, id);
+export function helperCost(s: GameState, id: HelperId): number {
+  const d = HELPERS.find((h) => h.id === id)!;
+  return Math.ceil(d.baseCost * Math.pow(d.growth, s.helpers[id]));
 }
-/** How many units a "buy xN" press gets and what it costs. 'max' = as many as the coins allow (at least 1). */
-export function unitBulk(s: GameState, id: UnitId, qty: number | 'max'): { n: number; cost: number } {
-  const d = UNITS.find((u) => u.id === id)!;
-  const want = qty === 'max' ? 1000 : qty;
-  let n = 0;
-  let cost = 0;
-  let next = d.baseCost * Math.pow(UNIT_GROWTH, s.units[id]);
-  while (n < want) {
-    const c = Math.ceil(next);
-    if (qty === 'max' && n > 0 && cost + c > s.coins) break;
-    cost += c;
-    n++;
-    next *= UNIT_GROWTH;
-  }
-  return { n, cost };
+export function helperLocked(s: GameState, id: HelperId): boolean {
+  return HELPERS.find((h) => h.id === id)!.sea && !s.boat;
 }
-export function buyUnit(s: GameState, id: UnitId, qty: number | 'max' = 1): boolean {
-  const d = UNITS.find((u) => u.id === id)!;
-  const b = unitBulk(s, id, qty);
-  if (!isUnlocked(s, d.unlockAt) || s.coins < b.cost) return false;
-  s.coins -= b.cost;
-  s.units[id] += b.n;
+export function canBuyHelper(s: GameState, id: HelperId): boolean {
+  const d = HELPERS.find((h) => h.id === id)!;
+  return !helperLocked(s, id) && s.helpers[id] < d.max && s.coins >= helperCost(s, id);
+}
+export function buyHelper(s: GameState, id: HelperId): boolean {
+  if (!canBuyHelper(s, id)) return false;
+  s.coins -= helperCost(s, id);
+  s.helpers[id]++;
   return true;
 }
 
-export function canBuyRecycler(s: GameState): boolean {
-  const next = RECYCLERS[s.recycler + 1];
-  return !!next && s.coins >= next.cost;
+export function canBuyBoat(s: GameState): boolean {
+  return !s.boat && s.coins >= BOAT_COST;
 }
-export function buyRecycler(s: GameState): boolean {
-  if (!canBuyRecycler(s)) return false;
-  s.coins -= RECYCLERS[s.recycler + 1]!.cost;
-  s.recycler++;
+export function buyBoat(s: GameState): boolean {
+  if (!canBuyBoat(s)) return false;
+  s.coins -= BOAT_COST;
+  s.boat = true;
   return true;
 }
 
-export function researchState(s: GameState, d: ResearchDef): 'done' | 'ready' | 'short' | 'locked' {
-  if (has(s, d.id)) return 'done';
-  const prev = RESEARCH.find((x) => x.branch === d.branch && x.tier === d.tier - 1);
-  if (prev && !has(s, prev.id)) return 'locked';
-  return s.rep >= d.cost ? 'ready' : 'short';
+export function sectorCost(id: number): number {
+  return Math.round(sectorValue(id) * 0.35);
 }
-export function buyResearch(s: GameState, id: string): boolean {
-  const d = RESEARCH.find((x) => x.id === id);
-  if (!d || researchState(s, d) !== 'ready') return false;
-  s.rep -= d.cost;
-  s.research.push(id);
+export type SectorBlock = 'owned' | 'far' | 'boat' | 'coins' | null;
+export function sectorBlock(s: GameState, id: number): SectorBlock {
+  if (s.sectors.includes(id)) return 'owned';
+  if (!neighbours(id).some((n) => s.sectors.includes(n))) return 'far';
+  if (isSeaSector(id) && !s.boat) return 'boat';
+  return s.coins >= sectorCost(id) ? null : 'coins';
+}
+export function openSector(s: GameState, f: Field | null, id: number): boolean {
+  if (sectorBlock(s, id) !== null) return false;
+  s.coins -= sectorCost(id);
+  s.sectors.push(id);
+  f?.syncOpen(s);
   return true;
 }
 
-export function canChartReef(s: GameState): boolean {
-  return !s.reefCharted && pct(s) >= 100 && has(s, 'e5') && s.rep >= REEF_ROUTE_COST;
-}
-export function chartReef(s: GameState): boolean {
-  if (!canChartReef(s)) return false;
-  s.rep -= REEF_ROUTE_COST;
-  s.reefCharted = true;
-  return true;
-}
+// ---- sweeping ---------------------------------------------------------------------
 
-// ---- goals & bonuses -----------------------------------------------------
-
-export interface GoalStatus { def: GoalDef; cur: number; done: boolean }
-
-export function goalStatus(s: GameState): GoalStatus | null {
-  const def = GOALS[s.goal];
-  if (!def) return null;
-  let cur = 0;
-  if (def.type === 'waste') cur = s.totalWaste;
-  else if (def.type === 'upgrade') cur = s.upgrades[def.id as UpgradeId];
-  else if (def.type === 'unit') cur = s.units[def.id as UnitId];
-  else if (def.type === 'research') cur = s.research.length;
-  else if (def.type === 'recycler') cur = s.recycler;
-  else if (def.type === 'pct') cur = pct(s);
-  else if (def.type === 'animals') cur = s.animals.length;
-  else cur = s.reefCharted ? 1 : 0;
-  return { def, cur: Math.min(cur, def.n), done: cur >= def.n };
-}
-/** Claims the current goal if it is complete. Returns the coins granted (0 if nothing to claim). */
-export function claimGoal(s: GameState): number {
-  const g = goalStatus(s);
-  if (!g || !g.done) return 0;
-  s.coins += g.def.reward;
-  s.totalCoins += g.def.reward;
-  s.goal++;
-  return g.def.reward;
-}
-
-/** Coins inside a message in a bottle: 45 seconds of current income, never less than 25. */
-export function bottleReward(s: GameState): number {
-  return Math.max(25, Math.round(coinsPerMinute(s) * 0.75));
-}
-export function grantBottle(s: GameState): number {
-  const amount = bottleReward(s);
-  s.coins += amount;
-  s.totalCoins += amount;
-  return amount;
-}
-
-// ---- progression ---------------------------------------------------------
-
-function checkProgress(s: GameState, events: GameEvent[]): void {
-  const whole = Math.floor(rawPct(s));
-  if (whole > s.repAwardedPct) {
-    s.rep += (whole - s.repAwardedPct) * repMult(s);
-    s.repAwardedPct = whole;
-  }
-  const p = pct(s);
-  for (const a of ANIMALS) {
-    if (p >= a.at && !s.animals.includes(a.id)) {
-      s.animals.push(a.id);
-      s.rep += 3 * repMult(s);
-      events.push({ kind: 'animal', id: a.id });
-    }
-  }
-  for (const m of MILESTONES) {
-    if (p >= m.pct && !s.milestones.includes(m.pct)) {
-      s.milestones.push(m.pct);
-      s.rep += m.rep * repMult(s);
-      if (m.pct === 100) s.beachRewarded = true;
-      events.push({ kind: 'milestone', pct: m.pct });
-    }
-  }
-}
-
-/** Manual collection (a tap). Overflow beyond storage still cleans the beach, it just earns no coins. */
-export function collect(s: GameState, amount: number): GameEvent[] {
-  const events: GameEvent[] = [];
-  s.waste = Math.min(storageCap(s), s.waste + amount);
-  s.totalWaste += amount;
-  s.restorePts += amount * restoreMult(s);
-  checkProgress(s, events);
-  return events;
-}
-
-export interface AdvanceResult {
-  collected: number;
+export interface SweepOut {
+  cells: number;
   coins: number;
   events: GameEvent[];
 }
+export interface Reach {
+  land: boolean;
+  sea: boolean;
+}
 
-/**
- * Advance automation + recycling by dt seconds. Exact for any dt, so the very same function
- * drives the frame loop and offline progress.
- */
-export function advance(s: GameState, dt: number, efficiency = 1): AdvanceResult {
-  const events: GameEvent[] = [];
-  if (dt <= 0) return { collected: 0, coins: 0, events };
-  const collected = autoRate(s) * efficiency * dt;
-  const available = s.waste + collected;
-  const recycled = Math.min(available, throughput(s) * dt);
-  const coins = recycled * coinValue(s);
-  s.waste = Math.min(storageCap(s), available - recycled);
-  s.coins += coins;
-  s.totalCoins += coins;
-  s.totalWaste += collected;
-  s.restorePts += collected * restoreMult(s);
-  checkProgress(s, events);
-  return { collected, coins, events };
+/** Sweep a circle: every dirty cell inside it (in an open sector, on terrain you can reach) becomes clean and pays. */
+export function sweep(s: GameState, f: Field, x: number, y: number, r: number, reach: Reach): SweepOut {
+  const out: SweepOut = { cells: 0, coins: 0, events: [] };
+  const gx0 = Math.max(0, Math.floor((x - r) / CELL));
+  const gx1 = Math.min(GW - 1, Math.floor((x + r) / CELL));
+  const gy0 = Math.max(0, Math.floor((y - r) / CELL));
+  const gy1 = Math.min(GH - 1, Math.floor((y + r) / CELL));
+  const r2 = r * r;
+  const touched: number[] = [];
+  for (let gy = gy0; gy <= gy1; gy++) {
+    const cy = gy * CELL + CELL / 2 - y;
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const i = gy * GW + gx;
+      if (!f.dirt[i]) continue;
+      const cx = gx * CELL + CELL / 2 - x;
+      if (cx * cx + cy * cy > r2) continue;
+      const sec = sectorOfCell(gx, gy);
+      if (!f.open[sec]) continue;
+      if (isWaterCell(gx, gy) ? !reach.sea : !reach.land) continue;
+      f.dirt[i] = 0;
+      f.left[sec]!--;
+      f.totalLeft--;
+      out.cells++;
+      out.coins += cellValue(s, sec);
+      f.onCell?.(gx, gy);
+      if (!touched.includes(sec)) touched.push(sec);
+    }
+  }
+  for (const sec of touched) finishSector(s, f, sec, out);
+  s.cleaned += out.cells;
+  s.coins += out.coins;
+  s.totalCoins += out.coins;
+  checkProgress(s, f, out.events);
+  return out;
+}
+
+/** Nearly clean: sweep the last specks for the player and pay a completion bonus. */
+function finishSector(s: GameState, f: Field, sec: number, out: SweepOut): void {
+  if (s.done.includes(sec) || f.left[sec]! > CELLS_PER_SECTOR * DONE_FRACTION) return;
+  const x0 = ((sec % SCOLS) * SECTOR) / CELL;
+  const y0 = (Math.floor(sec / SCOLS) * SECTOR) / CELL;
+  const n = SECTOR / CELL;
+  for (let gy = y0; gy < y0 + n; gy++) {
+    for (let gx = x0; gx < x0 + n; gx++) {
+      const i = gy * GW + gx;
+      if (!f.dirt[i]) continue;
+      f.dirt[i] = 0;
+      f.totalLeft--;
+      out.cells++;
+      out.coins += cellValue(s, sec);
+      f.onCell?.(gx, gy);
+    }
+  }
+  f.left[sec] = 0;
+  s.done.push(sec);
+  const bonus = Math.round(sectorValue(sec) * 0.25 * coinMult(s));
+  out.coins += bonus;
+  out.events.push({ kind: 'sector', id: sec, bonus });
+}
+
+export interface PickOut {
+  coins: number;
+  picked: number[];
+  /** Pieces in reach that need a bigger tool. */
+  tooBig: number[];
+}
+
+/** Pick up litter around a point. */
+export function pickLitter(s: GameState, f: Field, x: number, y: number, reach: Reach): PickOut {
+  const out: PickOut = { coins: 0, picked: [], tooBig: [] };
+  const r = toolRadius(s) + magnetRange(s);
+  for (let i = 0; i < LITTER.length; i++) {
+    if (f.picked[i]) continue;
+    const l = LITTER[i]!;
+    const d = Math.hypot(l.x - x, l.y - y);
+    if (d > r + LITTER_RADIUS[l.size]!) continue;
+    if (!f.open[l.sector] || (l.water ? !reach.sea : !reach.land)) continue;
+    if (s.tool < LITTER_TIER[l.size]!) {
+      if (d < toolRadius(s) + LITTER_RADIUS[l.size]!) out.tooBig.push(i);
+      continue;
+    }
+    f.picked[i] = 1;
+    s.picked++;
+    out.coins += litterValue(s, i);
+    out.picked.push(i);
+  }
+  s.coins += out.coins;
+  s.totalCoins += out.coins;
+  return out;
+}
+
+function checkProgress(s: GameState, f: Field, events: GameEvent[]): void {
+  const p = pct(f);
+  for (const a of ANIMALS) {
+    if (p >= a.at && !s.animals.includes(a.id)) {
+      s.animals.push(a.id);
+      events.push({ kind: 'animal', id: a.id });
+    }
+  }
+  if (f.totalLeft === 0 && events.length >= 0 && !s.done.includes(-1)) {
+    s.done.push(-1);
+    events.push({ kind: 'complete' });
+  }
+}
+
+/** Sectors cleaned, not counting the "everything clean" marker. */
+export function doneCount(s: GameState): number {
+  return s.done.filter((id) => id >= 0).length;
+}
+
+// ---- helpers working (live and offline) ---------------------------------------------
+
+/** Sectors a helper can work in: open, not finished, with terrain it can clean. */
+export function helperSectors(s: GameState, f: Field, sea: boolean): number[] {
+  return s.sectors.filter((id) => !s.done.includes(id) && f.left[id]! > 0 && (sea ? sectorRow(id) < SEA_ROWS : sectorRow(id) >= SEA_ROWS - 1));
+}
+
+/** Pick a random dirty cell (world position) in one of the sectors a helper works in. */
+export function helperTarget(s: GameState, f: Field, sea: boolean, rand: () => number = Math.random): { x: number; y: number } | null {
+  const secs = helperSectors(s, f, sea);
+  if (!secs.length) return null;
+  for (let tries = 0; tries < 60; tries++) {
+    const sec = secs[Math.floor(rand() * secs.length)]!;
+    const gx = ((sec % SCOLS) * SECTOR) / CELL + Math.floor(rand() * (SECTOR / CELL));
+    const gy = (Math.floor(sec / SCOLS) * SECTOR) / CELL + Math.floor(rand() * (SECTOR / CELL));
+    if (f.dirt[gy * GW + gx] && isWaterCell(gx, gy) === sea) return { x: gx * CELL + CELL / 2, y: gy * CELL + CELL / 2 };
+  }
+  return null;
 }
 
 export interface OfflineReport {
   seconds: number;
   capped: boolean;
-  waste: number;
+  cells: number;
   coins: number;
-  pctGain: number;
   events: GameEvent[];
 }
+export const OFFLINE_CAP = 8 * 3600;
+export const OFFLINE_EFFICIENCY = 0.5;
 
-export function applyOffline(s: GameState, elapsedSeconds: number): OfflineReport {
-  const cap = offlineCapSeconds(s);
-  const seconds = Math.max(0, Math.min(elapsedSeconds, cap));
-  const before = pct(s);
-  const res = advance(s, seconds, offlineEfficiency(s));
-  return {
-    seconds, capped: elapsedSeconds > cap, waste: res.collected, coins: res.coins,
-    pctGain: pct(s) - before, events: res.events,
-  };
+/** Helpers keep cleaning while you are away: random patches in their sectors, at half speed, for up to 8 hours. */
+export function applyOffline(s: GameState, f: Field, elapsedSeconds: number, rand: () => number = Math.random): OfflineReport {
+  const seconds = Math.max(0, Math.min(elapsedSeconds, OFFLINE_CAP));
+  const report: OfflineReport = { seconds, capped: elapsedSeconds > OFFLINE_CAP, cells: 0, coins: 0, events: [] };
+  const r = helperRadius(s);
+  for (const h of HELPERS) {
+    let budget = helperRate(s, h.id) * seconds * OFFLINE_EFFICIENCY;
+    let misses = 0;
+    while (budget > 0 && misses < 200) {
+      const p = helperTarget(s, f, h.sea, rand);
+      if (!p) break;
+      const res = sweep(s, f, p.x, p.y, r, { land: !h.sea, sea: h.sea });
+      if (res.cells === 0) { misses++; continue; }
+      budget -= res.cells;
+      report.cells += res.cells;
+      report.coins += res.coins;
+      report.events.push(...res.events);
+    }
+  }
+  return report;
+}
+
+// ---- goals -------------------------------------------------------------------------
+
+export interface GoalStatus { def: GoalDef; cur: number; done: boolean }
+
+export function goalStatus(s: GameState, f: Field): GoalStatus | null {
+  const def = GOALS[s.goal];
+  if (!def) return null;
+  let cur = 0;
+  switch (def.type) {
+    case 'cleaned': cur = s.cleaned; break;
+    case 'tool': cur = s.tool; break;
+    case 'upgrade': cur = s.upgrades[def.id as UpgradeId]; break;
+    case 'sectors': cur = s.sectors.length; break;
+    case 'done': cur = doneCount(s); break;
+    case 'helper': cur = s.helpers[def.id as HelperId]; break;
+    case 'boat': cur = s.boat ? 1 : 0; break;
+    case 'pct': cur = pct(f); break;
+    case 'items': cur = s.picked; break;
+  }
+  return { def, cur: Math.min(cur, def.n), done: cur >= def.n };
+}
+export function claimGoal(s: GameState, f: Field): number {
+  const g = goalStatus(s, f);
+  if (!g || !g.done) return 0;
+  s.coins += g.def.reward;
+  s.totalCoins += g.def.reward;
+  s.goal++;
+  return g.def.reward;
 }

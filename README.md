@@ -1,28 +1,26 @@
 # Ocean Restoration 🏝️
 
-A cozy, mobile-first incremental / idle game. You start on a small polluted beach, pick up trash by hand,
-recycle it into coins, buy better gear, automate the cleanup and watch the ecosystem come back to life.
-
-The point is not just bigger numbers: the water turns turquoise, palms and seagrass grow back, coral appears
-and twelve animals return one by one as the beach recovers.
+A cozy, mobile-first cleaning game seen from above. A huge coast is covered in grime and litter, every last patch of
+it. You start with a tiny dustpan and the camera right down at your feet. Each patch you sweep pays a few coins;
+coins buy bigger tools, and as your tool grows the camera pulls back so you see (and clean) more of the coast at once.
 
 ## Play
 
-- **Sweep**: touch and drag to walk; you pick up every piece of trash inside your tool's reach (the dashed ring).
-  Waste goes to storage, the recycler turns it into coins.
-- **Sectors**: the coast is a 3×4 grid. You start with two sectors; tap the fog to open a neighbouring one.
-  Sweep a sector completely clean for a bonus. Cleaned sectors keep getting a little tide trash.
-- **Equipment**: sweeping tools (broom → mega sweeper), quick boots, a boat (rowboat → skimmer) that opens the
-  sea sectors, plus grabber, bag, net and five tiers of recycling infrastructure.
-- **Automation**: workers, electric beach cleaners, boats, floating collectors, vessels, drones and ocean robots.
-  Every unit you buy is visible working in the scene. Buy ×1, ×10 or Max.
-- **Research**: spend Ocean Reputation in three branches (Cleanup, Automation, Ecology).
-- **Goals**: a chain of small objectives at the bottom of the screen; tap to claim the coin reward.
-- **Message in a bottle**: now and then a glowing bottle drifts in. Tap it for a coin bonus.
-- **Ocean Map**: the Tropical Beach is fully playable; the other five regions are locked destinations.
-- **Offline**: helpers keep working while you are away (50% for up to 8 h; research raises it to 100% / 16 h).
+- **Move**: touch anywhere and drag (a floating joystick), or tap a spot to walk there. Arrow keys / WASD on desktop.
+- **Sweep**: everything inside your dashed ring is cleaned as you move. Clean sand and clear water show through.
+- **Litter**: bottles, cans, tyres, barrels and ghost nets lie on top of the dirt and pay a bonus. The big ones need
+  a bigger tool (a 🔒 badge tells you which).
+- **Sectors**: the coast is a 10×20 grid (200 sectors). Tap a fenced sector next to your area to open it. Further
+  sectors cost more and pay more. Get a sector to 97% and the last specks are swept for you, plus a bonus.
+- **The sea**: the top third of the map is water. Buy the boat and you switch to it as soon as you drive in.
+  Sea sectors pay 50% more.
+- **Tools** (10): dustpan → hand broom → rake → push sweeper → sand sifter → buggy → tractor rake → sweeper truck →
+  mega sifter → titan cleaner. Plus Quick Boots (speed), Sorting Skills (coins) and the Trash Magnet.
+- **Helpers**: Sand Bots and Sea Drones clean open sectors by themselves, also while you are away (50%, up to 8 h).
+- **Map**: the whole coast at a glance; tap to open sectors or walk to one. **Life**: 12 animals return as the coast
+  gets cleaner, and you meet them on clean sand and in clear water.
 
-No timers, energy, ads or daily-login pressure. Progress is saved in the browser (`localStorage`).
+No timers, energy, ads or daily-login pressure. Progress (including the dirt grid) is saved in the browser.
 
 ## Develop
 
@@ -31,8 +29,8 @@ Requires Node 22.18+.
 ```bash
 npm install
 npm run dev       # local dev server
-npm test          # unit tests for the economy
-npm run balance   # bot that plays the economy and prints a progression timeline
+npm test          # unit tests for the rules
+npm run balance   # bot that plays the real grid and prints a progression timeline
 npm run build     # type-check + production build into dist/
 ```
 
@@ -41,15 +39,12 @@ Pushing to `main` builds and publishes to GitHub Pages (`.github/workflows/deplo
 ## Structure
 
 ```
-src/core/content.ts   all game data: upgrades, units, recyclers, research, animals, regions
-src/core/sim.ts       pure rules: rates, costs, purchases, restoration, offline progress
-src/core/state.ts     save format + localStorage persistence
+src/core/world.ts     map geometry: sectors, shoreline, dirt grid size, litter placement
+src/core/content.ts   tools, upgrades, helpers, animals, goals
+src/core/sim.ts       rules: sweeping, litter, costs, purchases, sector completion, offline helpers
+src/core/state.ts     save format (dirt grid as a bitset) + localStorage
+src/scene/scene.ts    camera, dirt layer (cell mask + debris texture), input, helpers, animals, minimap
 src/scene/sprites.ts  procedural canvas sprites (no image assets)
-src/scene/scene.ts    the living beach: trash, units, animals, effects
-src/ui/               HUD, bottom navigation, sheets, toasts, modals
-src/audio.ts          synthesised sound effects and ambient surf
-tools/balance.ts      economy simulator
+src/ui/               HUD, minimap, bottom navigation, sheets, toasts, modals
+tools/balance.ts      progression simulator
 ```
-
-Adding a region means adding data in `content.ts` and a scene for it; the rules in `sim.ts` are region-agnostic
-apart from the restoration target.
