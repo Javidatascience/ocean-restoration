@@ -22,7 +22,7 @@ export interface CollectedItem { kind: number; x: number; y: number }
 
 /** Seconds a message in a bottle stays before drifting away. */
 const BOTTLE_LIFE = 45;
-const VISIBLE_CAP: Record<UnitId, number> = { worker: 6, cleaner: 3, boat: 4, floater: 4, vessel: 2, drone: 4, robot: 3 };
+const VISIBLE_CAP: Record<UnitId, number> = { worker: 1, cleaner: 1, boat: 1, floater: 1, vessel: 1, drone: 1, robot: 1 };
 const SPEED: Record<UnitId, number> = { worker: 26, cleaner: 36, boat: 30, floater: 0, vessel: 13, drone: 62, robot: 11 };
 const WORKER_SHIRTS = ['#ff9f43', '#ff7aa2', '#7c9cf5', '#4cc27a', '#b58cf0', '#f2c14e'];
 

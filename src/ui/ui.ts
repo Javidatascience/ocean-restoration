@@ -49,6 +49,16 @@ export class UI {
       act.tabSound();
     });
     $('sheet-body').addEventListener('click', (e) => this.onSheetClick(e));
+    $('pill-waste').addEventListener('click', () => {
+      const s = this.s;
+      this.toast(
+        'Waste storage',
+        `Collected waste waits here (${fmt(s.waste)} of ${fmt(sim.storageCap(s))}) until the recycler turns it into coins. ` +
+          `Your helpers bring in ${fmt(sim.wastePerMinute(s))}/min and the recycler processes ${fmt(sim.throughput(s) * 60)}/min. ` +
+          `When storage is full, extra waste is lost: build a better recycler or add conveyors.`,
+        '♻️',
+      );
+    });
     $('hint').addEventListener('click', () => {
       if (act.claimGoal() > 0) this.refresh();
     });
@@ -115,14 +125,16 @@ export class UI {
     const p = sim.pct(s);
     const cap = sim.storageCap(s);
     const hud = [
-      fmt(s.coins), fmt(sim.coinsPerMinute(s)), fmt(s.waste), fmt(cap), fmt(sim.wastePerMinute(s)), Math.floor(s.rep), p.toFixed(1),
+      fmt(s.coins), fmt(sim.coinsPerMinute(s)), fmt(s.waste), fmt(cap), fmt(sim.wastePerMinute(s)), sim.isBottlenecked(s), Math.floor(s.rep), p.toFixed(1),
     ].join('|');
     if (hud !== this.lastHud) {
       this.lastHud = hud;
       $('coins').textContent = fmt(s.coins);
       $('coins-rate').textContent = `+${fmt(sim.coinsPerMinute(s))}/min`;
       $('waste').textContent = `${fmt(s.waste)}/${fmt(cap)}`;
-      $('waste-rate').textContent = `+${fmt(sim.wastePerMinute(s))}/min`;
+      $('waste-rate').textContent = sim.isBottlenecked(s)
+        ? `FULL · recycles ${fmt(sim.throughput(s) * 60)}/min`
+        : `in +${fmt(sim.wastePerMinute(s))}/min`;
       $('rep').textContent = fmt(Math.floor(s.rep));
       $('pct').textContent = p >= 100 ? '100% ✨' : p.toFixed(1) + '%';
       $('pct-fill').style.width = p + '%';
