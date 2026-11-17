@@ -24,7 +24,7 @@ function run(label: string, activeFraction: number): void {
     if (active) {
       const spawn = sim.has(s, 'c2') ? 3.3 : 1.66;
       const taps = Math.min(1.5, spawn);
-      const perTap = sim.tapPower(s) * 1.3 * (1 + 0.5 * s.upgrades.cart) + sim.tapBonus(s);
+      const perTap = sim.tapPower(s) * 1.3 * (1 + 0.5 * s.upgrades.sweeper) + sim.tapBonus(s);
       sim.collect(s, taps * perTap * dt);
     }
     // Research: cheapest available.

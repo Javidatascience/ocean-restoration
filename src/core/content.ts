@@ -1,6 +1,6 @@
 // All game content lives here as plain data, so new regions / gear can be added without touching systems.
 
-export type UpgradeId = 'grabber' | 'bag' | 'net' | 'cart' | 'conveyor';
+export type UpgradeId = 'grabber' | 'bag' | 'net' | 'sweeper' | 'boots' | 'boat' | 'conveyor';
 export type UnitId = 'worker' | 'cleaner' | 'boat' | 'floater' | 'vessel' | 'drone' | 'robot';
 export type Branch = 'cleanup' | 'automation' | 'ecology';
 
@@ -18,12 +18,25 @@ export interface UpgradeDef {
 }
 
 export const UPGRADES: UpgradeDef[] = [
-  { id: 'grabber', group: 'tools', name: 'Trash Grabber', icon: '🦾', desc: 'A long-reach grabber. More waste with every tap.', baseCost: 10, growth: 1.33, max: 50, unlockAt: 0 },
+  { id: 'grabber', group: 'tools', name: 'Trash Grabber', icon: '🦾', desc: 'A long-reach grabber. More waste from every piece you pick up.', baseCost: 10, growth: 1.33, max: 50, unlockAt: 0 },
   { id: 'bag', group: 'tools', name: 'Large Collection Bag', icon: '🎒', desc: 'Carry more before recycling: bigger storage and heavier hauls.', baseCost: 35, growth: 1.55, max: 30, unlockAt: 0 },
   { id: 'net', group: 'tools', name: 'Small Fishing Net', icon: '🥅', desc: 'Scoops up floating debris. Boosts every source of collection.', baseCost: 120, growth: 1.5, max: 25, unlockAt: 5 },
-  { id: 'cart', group: 'tools', name: 'Beach Cleaning Cart', icon: '🛒', desc: 'One tap sweeps up everything nearby.', baseCost: 400, growth: 3.2, max: 5, unlockAt: 15 },
+  { id: 'sweeper', group: 'tools', name: 'Sweeping Tool', icon: '🧹', desc: 'Broom, rake, vacuum, sweeper cart: a wider sweep area and +20% waste per level.', baseCost: 60, growth: 3, max: 5, unlockAt: 0 },
+  { id: 'boots', group: 'tools', name: 'Quick Boots', icon: '👟', desc: 'Walk faster and sweep more ground. +40% speed per level.', baseCost: 40, growth: 2.3, max: 5, unlockAt: 0 },
+  { id: 'boat', group: 'tools', name: 'Cleanup Boat', icon: '⛵', desc: 'Lets you sail out and clean the sea sectors. Upgrades make it faster and wider.', baseCost: 900, growth: 5, max: 3, unlockAt: 0 },
   { id: 'conveyor', group: 'recycling', name: 'Conveyor Belts', icon: '⚙️', desc: 'Feeds waste into the recycler faster.', baseCost: 60, growth: 1.5, max: 40, unlockAt: 0 },
 ];
+
+/** The beach is a grid of sectors. Sector id = row * SECTOR_COLS + col. */
+export const SECTOR_COLS = 3;
+export const SECTOR_ROWS = 4;
+export const SECTOR_COUNT = SECTOR_COLS * SECTOR_ROWS;
+/** Sectors that are open from the start (the bottom row, next to the recycling station). */
+export const SECTOR_START = [9, 10];
+/** Pieces of trash lying in a sector when you open it. */
+export const SECTOR_TRASH = 12;
+export const SWEEP_TIERS = ['Bare hands', 'Broom', 'Rake', 'Beach vacuum', 'Sweeper cart', 'Mega sweeper'];
+export const BOAT_TIERS = ['No boat', 'Rowboat', 'Motorboat', 'Skimmer'];
 
 export interface UnitDef {
   id: UnitId;

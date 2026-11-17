@@ -136,3 +136,49 @@ function newStateWithWorkers() {
   s.units.worker = 10;
   return s;
 }
+
+describe('sectors and sweeping', () => {
+  it('starts with the two station sectors open and a pile of trash in each', () => {
+    const s = newState(0);
+    expect(s.sectors).toEqual([9, 10]);
+    expect(s.sectorLeft[9]).toBe(12);
+  });
+
+  it('opening a sector costs coins, must touch an open one, and sea sectors also need a boat', () => {
+    const s = newState(0);
+    expect(sim.sectorBlock(s, 6, false)).toBe('coins');
+    s.coins = 1e6;
+    expect(sim.sectorBlock(s, 0, false)).toBe('far');
+    const cost = sim.sectorCost(s);
+    expect(sim.openSector(s, 6, false)).toBe(true);
+    expect(s.coins).toBe(1e6 - cost);
+    expect(sim.sectorCost(s)).toBeGreaterThan(cost);
+    expect(sim.sectorBlock(s, 3, true)).toBe('boat');
+    expect(sim.openSector(s, 3, true)).toBe(false);
+    s.upgrades.boat = 1;
+    expect(sim.openSector(s, 3, true)).toBe(true);
+  });
+
+  it('sweeping the last piece of a sector pays a one-off bonus', () => {
+    const s = newState(0);
+    for (let i = 0; i < 11; i++) expect(sim.sweptItem(s, 9, false).reward).toBe(0);
+    const last = sim.sweptItem(s, 9, false);
+    expect(last.reward).toBeGreaterThan(0);
+    expect(s.sectorsCleared).toEqual([9]);
+    expect(sim.sweptItem(s, 9, false).reward).toBe(0);
+    expect(sim.sweptItem(s, 10, true).reward).toBe(0); // tide trash never counts
+    expect(s.sectorLeft[10]).toBe(12);
+  });
+
+  it('better tools and boots reach further and move faster; the boat is quicker on water', () => {
+    const s = newState(0);
+    const r0 = sim.sweepRadius(s);
+    const v0 = sim.moveSpeed(s);
+    s.upgrades.sweeper = 2;
+    s.upgrades.boots = 2;
+    expect(sim.sweepRadius(s)).toBeGreaterThan(r0);
+    expect(sim.moveSpeed(s)).toBeGreaterThan(v0);
+    s.upgrades.boat = 3;
+    expect(sim.moveSpeed(s, true)).toBeGreaterThan(sim.moveSpeed(s));
+  });
+});

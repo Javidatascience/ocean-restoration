@@ -77,17 +77,50 @@ const ui = new UI(state, {
   tabSound: () => sfx.tab(),
 });
 
-scene.onCollect = (items) => {
+let lastBonus = 0;
+let lastPop = 0;
+let lastBuzz = 0;
+scene.onCollect = (items, px, py) => {
   unlockAudio();
-  let first = true;
+  const now = performance.now();
+  let total = 0;
+  let best = items[0]!;
   for (const it of items) {
-    const amount = sim.tapPower(state) * KIND_VALUE[it.kind] + (first ? sim.tapBonus(state) : 0);
-    first = false;
+    let amount = sim.tapPower(state) * KIND_VALUE[it.kind]!;
+    if (now - lastBonus > 400) { amount += sim.tapBonus(state); lastBonus = now; }
+    total += amount;
+    if (KIND_VALUE[it.kind]! > KIND_VALUE[best.kind]!) best = it;
     handle(sim.collect(state, amount));
-    scene.popup(it.x, it.y - 16, '+' + fmt(amount), KIND_VALUE[it.kind] > 1.6 ? '#ffe08a' : '#ffffff', KIND_VALUE[it.kind] > 1.6 ? 17 : 14);
+    const swept = sim.sweptItem(state, it.sector, it.tide);
+    if (swept.reward > 0) {
+      handle(swept.events);
+      scene.sectorCleaned(it.sector);
+      sfx.unlock();
+      navigator.vibrate?.([12, 40, 12]);
+      ui.toast('Sector cleaned!', `Every last piece is gone. Bonus: ${fmt(swept.reward)} coins.`, '✨');
+      scene.popup(px, py - 40, '+' + fmt(swept.reward), '#ffd24a', 22);
+      save(state);
+    }
   }
-  sfx.pop();
-  navigator.vibrate?.(8);
+  scene.popup(best.x, best.y - 16, '+' + fmt(total), KIND_VALUE[best.kind]! > 1.6 ? '#ffe08a' : '#ffffff', KIND_VALUE[best.kind]! > 1.6 ? 17 : 14);
+  if (now - lastPop > 60) { sfx.pop(); lastPop = now; }
+  if (now - lastBuzz > 140) { navigator.vibrate?.(8); lastBuzz = now; }
+};
+scene.onSector = (id, sea) => {
+  const why = sim.sectorBlock(state, id, sea);
+  if (why === null && sim.openSector(state, id, sea)) {
+    sfx.buy();
+    sfx.unlock();
+    scene.sectorOpened(id);
+    navigator.vibrate?.(15);
+    document.getElementById('pill-coins')?.animate([{ transform: 'scale(1.08)' }, { transform: 'scale(1)' }], { duration: 220 });
+    save(state);
+    return;
+  }
+  sfx.deny();
+  if (why === 'far') ui.toast('Too far', 'Open a sector next to one you already have first.', '🧭');
+  else if (why === 'boat') ui.toast('Sea sector', 'You need a boat to clean the sea. Buy one in Equipment.', '⛵');
+  else ui.toast('New sector', `Opening it costs ${fmt(sim.sectorCost(state))} coins. Keep sweeping!`, '🧭');
 };
 scene.onBottle = (x, y) => {
   unlockAudio();

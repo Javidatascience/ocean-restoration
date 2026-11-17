@@ -1,6 +1,6 @@
 // Pure game rules: no DOM, no timers. Used by the game loop, offline progress, tests and the balance tool.
 import {
-  ANIMALS, GOALS, MILESTONES, RECYCLERS, REEF_ROUTE_COST, RESEARCH, UNITS, UNIT_GROWTH, UPGRADES,
+  ANIMALS, GOALS, SECTOR_COLS, SECTOR_COUNT, SECTOR_TRASH, MILESTONES, RECYCLERS, REEF_ROUTE_COST, RESEARCH, UNITS, UNIT_GROWTH, UPGRADES,
   type GoalDef, type ResearchDef, type UnitId, type UpgradeId,
 } from './content.ts';
 import type { GameState } from './state.ts';
@@ -58,18 +58,18 @@ export function autoRate(s: GameState): number {
   return total;
 }
 
-/** Waste collected by tapping one ordinary piece of trash. */
+/** Waste collected from one ordinary piece of trash. */
 export function tapPower(s: GameState): number {
   const g = s.upgrades.grabber;
   let p = (1 + g) * Math.pow(2, Math.floor(g / 10));
   p *= 1 + 0.1 * s.upgrades.bag;
-  p *= 1 + 0.2 * s.upgrades.cart;
+  p *= 1 + 0.2 * s.upgrades.sweeper;
   if (has(s, 'c1')) p *= 2;
   if (has(s, 'c2')) p *= 1.5;
   return p * collectMult(s);
 }
 
-/** Flat bonus added to each tap by Helping Hands. */
+/** Flat bonus added to a pick-up by Helping Hands. */
 export function tapBonus(s: GameState): number {
   return has(s, 'c3') ? autoRate(s) * 1.5 : 0;
 }
@@ -120,6 +120,60 @@ export function wastePerMinute(s: GameState): number {
 /** True when collection outpaces recycling and storage is overflowing. */
 export function isBottlenecked(s: GameState): boolean {
   return s.waste >= storageCap(s) * 0.98 && autoRate(s) > throughput(s);
+}
+
+// ---- sweeping & sectors --------------------------------------------------
+
+/** True while the player is out on the water in the boat. */
+export const canSail = (s: GameState): boolean => s.upgrades.boat >= 1;
+
+/** Sweep radius in design pixels (the scene scales it to the screen). */
+export function sweepRadius(s: GameState, onWater = false): number {
+  const r = 24 + 13 * s.upgrades.sweeper;
+  return onWater ? r * [1, 1, 1.3, 1.7][s.upgrades.boat]! : r;
+}
+/** Walking / sailing speed in design pixels per second. */
+export function moveSpeed(s: GameState, onWater = false): number {
+  const v = 80 * (1 + 0.4 * s.upgrades.boots);
+  return onWater ? v * [1, 0.9, 1.4, 1.9][s.upgrades.boat]! : v;
+}
+
+export function sectorCost(s: GameState): number {
+  return Math.round(100 * Math.pow(2.1, Math.max(0, s.sectors.length - 2)));
+}
+export type SectorBlock = 'owned' | 'far' | 'boat' | 'coins' | null;
+/** A sector can only be opened next to one you already own, so you can always walk (or sail) there. */
+export function nextToOpen(s: GameState, id: number): boolean {
+  return s.sectors.some((o) => Math.abs(o - id) === SECTOR_COLS || (Math.abs(o - id) === 1 && Math.floor(o / SECTOR_COLS) === Math.floor(id / SECTOR_COLS)));
+}
+export function sectorBlock(s: GameState, id: number, sea: boolean): SectorBlock {
+  if (s.sectors.includes(id)) return 'owned';
+  if (!nextToOpen(s, id)) return 'far';
+  if (sea && !canSail(s)) return 'boat';
+  return s.coins >= sectorCost(s) ? null : 'coins';
+}
+export function openSector(s: GameState, id: number, sea: boolean): boolean {
+  if (sectorBlock(s, id, sea) !== null || s.sectors.length >= SECTOR_COUNT) return false;
+  s.coins -= sectorCost(s);
+  s.sectors.push(id);
+  s.sectorLeft[id] = SECTOR_TRASH;
+  return true;
+}
+export interface SweepResult { reward: number; events: GameEvent[] }
+/** A piece of trash was swept up in this sector. Cleaning a sector completely pays a bonus. */
+export function sweptItem(s: GameState, sector: number, tide: boolean): SweepResult {
+  const none: SweepResult = { reward: 0, events: [] };
+  if (tide || !(sector in s.sectorLeft)) return none;
+  s.sectorLeft[sector] = Math.max(0, s.sectorLeft[sector]! - 1);
+  if (s.sectorLeft[sector] > 0 || s.sectorsCleared.includes(sector)) return none;
+  s.sectorsCleared.push(sector);
+  const reward = Math.max(60, Math.round(coinsPerMinute(s) * 2));
+  s.coins += reward;
+  s.totalCoins += reward;
+  s.restorePts += Math.max(150, s.restorePts * 0.04);
+  const events: GameEvent[] = [];
+  checkProgress(s, events);
+  return { reward, events };
 }
 
 // ---- costs & purchases ---------------------------------------------------

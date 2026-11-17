@@ -1,4 +1,4 @@
-import { UPGRADES, UNITS, type UpgradeId, type UnitId } from './content.ts';
+import { SECTOR_START, SECTOR_TRASH, UPGRADES, UNITS, type UpgradeId, type UnitId } from './content.ts';
 
 export interface GameState {
   v: 1;
@@ -21,6 +21,10 @@ export interface GameState {
   reefCharted: boolean;
   /** Index of the current goal in GOALS. */
   goal: number;
+  /** Open sector ids, trash still lying in each, and the ones swept completely clean. */
+  sectors: number[];
+  sectorLeft: Record<number, number>;
+  sectorsCleared: number[];
   sound: boolean;
   lastSeen: number;
 }
@@ -34,6 +38,7 @@ export function newState(now = Date.now()): GameState {
     v: 1, coins: 0, waste: 0, rep: 0, restorePts: 0, repAwardedPct: 0, totalWaste: 0, totalCoins: 0,
     upgrades, units, recycler: 0, research: [], animals: [], milestones: [],
     beachRewarded: false, reefCharted: false, goal: 0, sound: true, lastSeen: now,
+    sectors: [...SECTOR_START], sectorLeft: Object.fromEntries(SECTOR_START.map((id) => [id, SECTOR_TRASH])), sectorsCleared: [],
   };
 }
 
@@ -60,6 +65,7 @@ export function load(): GameState | null {
       ...base, ...data,
       upgrades: { ...base.upgrades, ...data.upgrades },
       units: { ...base.units, ...data.units },
+      sectorLeft: data.sectors ? { ...data.sectorLeft } : base.sectorLeft,
     } as GameState;
   } catch {
     return null;

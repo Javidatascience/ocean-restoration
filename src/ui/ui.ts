@@ -1,6 +1,6 @@
 // DOM interface: HUD, bottom navigation, the slide-up sheet with its five panels, toasts and modals.
 import {
-  ANIMALS, BRANCHES, MILESTONES, RECYCLERS, REEF_ROUTE_COST, REGIONS, RESEARCH, UNITS, UPGRADES,
+  ANIMALS, BOAT_TIERS, BRANCHES, MILESTONES, RECYCLERS, REEF_ROUTE_COST, REGIONS, RESEARCH, SECTOR_COUNT, SWEEP_TIERS, UNITS, UPGRADES,
   type UnitId, type UpgradeId,
 } from '../core/content.ts';
 import { fmt, fmtDuration } from '../core/format.ts';
@@ -133,7 +133,7 @@ export class UI {
       $('coins-rate').textContent = `+${fmt(sim.coinsPerMinute(s))}/min`;
       $('waste').textContent = `${fmt(s.waste)}/${fmt(cap)}`;
       $('waste-rate').textContent = sim.isBottlenecked(s)
-        ? `FULL · recycles ${fmt(sim.throughput(s) * 60)}/min`
+        ? `FULL · ${fmt(sim.throughput(s) * 60)}/min out`
         : `in +${fmt(sim.wastePerMinute(s))}/min`;
       $('rep').textContent = fmt(Math.floor(s.rep));
       $('pct').textContent = p >= 100 ? '100% ✨' : p.toFixed(1) + '%';
@@ -176,7 +176,7 @@ export class UI {
     const stuck = sim.isBottlenecked(s) && (s.recycler < RECYCLERS.length - 1 || s.upgrades.conveyor < 40);
     const goal = sim.goalStatus(s);
     const claim = !!goal && goal.done;
-    if (s.totalWaste < 4) text = '👆 Tap the trash to clean the beach';
+    if (s.totalWaste < 4) text = '👆 Touch and drag to walk — you sweep up the trash around you';
     else if (goal && claim) text = `🎁 Goal complete — tap to claim ${fmt(goal.def.reward)}`;
     else if (stuck) text = '📦 Storage is full — upgrade your recycling';
     else if (goal) {
@@ -242,10 +242,12 @@ export class UI {
       return [now, next];
     };
     const arrow = (a: string, b: string) => (lvl >= def.max ? a : `${a} <span class="to">→ ${b}</span>`);
-    if (id === 'grabber') { const [a, b] = peek(() => sim.tapPower(s)); return 'Tap power ' + arrow(fmt(a), fmt(b)); }
-    if (id === 'bag') { const [a, b] = peek(() => sim.storageCap(s)); return 'Storage ' + arrow(fmt(a), fmt(b)) + ' · tap +10%'; }
+    if (id === 'grabber') { const [a, b] = peek(() => sim.tapPower(s)); return 'Waste per piece ' + arrow(fmt(a), fmt(b)); }
+    if (id === 'bag') { const [a, b] = peek(() => sim.storageCap(s)); return 'Storage ' + arrow(fmt(a), fmt(b)) + ' · waste per piece +10%'; }
     if (id === 'net') return 'All collection ' + arrow(`+${lvl * 10}%`, `+${(lvl + 1) * 10}%`);
-    if (id === 'cart') return lvl === 0 ? 'Tap sweeps an area · tap +20%' : 'Sweep area ' + arrow(`size ${lvl}`, `size ${lvl + 1}`) + ' · tap +20%';
+    if (id === 'sweeper') return arrow(SWEEP_TIERS[lvl]!, SWEEP_TIERS[lvl + 1]!) + ` · reach ${arrow(String(sim.sweepRadius(s)), String(sim.sweepRadius({ ...s, upgrades: { ...s.upgrades, sweeper: lvl + 1 } })))} · +20% waste`;
+    if (id === 'boots') { const [a, b] = peek(() => sim.moveSpeed(s)); return 'Walking speed ' + arrow(fmt(a), fmt(b)); }
+    if (id === 'boat') return arrow(BOAT_TIERS[lvl]!, BOAT_TIERS[lvl + 1]!) + (lvl === 0 ? ' · opens the sea sectors' : ' · faster, wider sweep at sea');
     const [a, b] = peek(() => sim.throughput(s) * 60);
     return 'Recycles ' + arrow(fmt(a), fmt(b)) + '/min';
   }
@@ -266,7 +268,8 @@ export class UI {
     const recycler = next
       ? `<div class="card feature"><canvas class="ico" data-icon="recycler:${s.recycler + 1}"></canvas><div class="info"><div class="name">${next.name}<span class="lvl">Tier ${s.recycler + 2}/5</span></div><div class="desc">${next.desc}</div><div class="eff">${fmt(next.throughput * 60)} waste/min base · ${next.value} coins per waste <span class="to">(now ${cur.value})</span></div></div>${this.buyBtn('recycler', next.cost, 'coins', 'Build')}</div>`
       : `<div class="card feature"><canvas class="ico" data-icon="recycler:${s.recycler}"></canvas><div class="info"><div class="name">${cur.name}<span class="lvl">Tier 5/5</span></div><div class="desc">${cur.desc}</div><div class="eff">${cur.value} coins per waste</div></div><div class="max">MAX</div></div>`;
-    return `<h3>Hand tools</h3>${(['grabber', 'bag', 'net', 'cart'] as UpgradeId[]).map((id) => this.upgradeCard(id)).join('')}
+    const sectors = `<div class="summary"><b>${s.sectors.length}/${SECTOR_COUNT}</b> sectors open · <b>${s.sectorsCleared.length}</b> swept clean. Tap the fog on the beach to open the next sector (${fmt(sim.sectorCost(s))} coins).</div>`;
+    return `${sectors}<h3>Sweeping &amp; movement</h3>${(['sweeper', 'boots', 'boat', 'grabber', 'bag', 'net'] as UpgradeId[]).map((id) => this.upgradeCard(id)).join('')}
       <h3>Recycling <small>${cur.name} · ${fmt(sim.throughput(s) * 60)} waste/min · ${fmt(sim.coinValue(s))} coins each</small></h3>${recycler}${this.upgradeCard('conveyor')}`;
   }
 

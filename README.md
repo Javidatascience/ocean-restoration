@@ -8,8 +8,12 @@ and twelve animals return one by one as the beach recovers.
 
 ## Play
 
-- **Tap** trash to collect it. Waste goes to storage, the recycler turns it into coins.
-- **Equipment**: hand tools (grabber, bag, net, cart) and five tiers of recycling infrastructure.
+- **Sweep**: touch and drag to walk; you pick up every piece of trash inside your tool's reach (the dashed ring).
+  Waste goes to storage, the recycler turns it into coins.
+- **Sectors**: the coast is a 3×4 grid. You start with two sectors; tap the fog to open a neighbouring one.
+  Sweep a sector completely clean for a bonus. Cleaned sectors keep getting a little tide trash.
+- **Equipment**: sweeping tools (broom → mega sweeper), quick boots, a boat (rowboat → skimmer) that opens the
+  sea sectors, plus grabber, bag, net and five tiers of recycling infrastructure.
 - **Automation**: workers, electric beach cleaners, boats, floating collectors, vessels, drones and ocean robots.
   Every unit you buy is visible working in the scene. Buy ×1, ×10 or Max.
 - **Research**: spend Ocean Reputation in three branches (Cleanup, Automation, Ecology).
