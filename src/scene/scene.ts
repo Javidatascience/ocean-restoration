@@ -181,6 +181,8 @@ export class Scene {
   private powerTimer = 35;
   /** Current sweep radius (tool, or doubled by the Mega Brush). */
   private curR = 4;
+  /** Size boost for animals when zoomed far out. */
+  private comp = 1;
   /** Name banner shown for a moment when you walk into another sector. */
   private here = -1;
   private banner = { text: '', t: 9 };
@@ -690,6 +692,8 @@ export class Scene {
     const vx1 = this.camX + W / 2 / z;
     const vy1 = this.camY + H / 2 / z;
     const px = 1 / z; // one screen pixel in world units
+    // animals keep a minimum on-screen size when the camera pulls back
+    this.comp = Math.max(1, px / 0.8);
 
     // --- water
     const wg = c.createLinearGradient(0, 0, 0, shoreY(WORLD_W / 2));
@@ -864,20 +868,40 @@ export class Scene {
       S.ell(c, p.x, p.y, p.r * (1 - u * 0.5), p.r * (1 - u * 0.5), `rgba(${p.color},${1 - u})`);
     }
 
-    // seagulls overhead once they are back
+    // seagulls: now and then a pair glides across the view, high above the beach, with a soft shadow below
     if (s.animals.includes('gull')) {
-      for (let i = 0; i < 2; i++) {
-        const an = t * (0.25 + i * 0.06) + i * 2.6;
-        const span = (vx1 - vx0) * 0.4;
-        const x = this.camX + Math.cos(an) * span;
-        const y = this.camY + Math.sin(an) * span * 0.7;
-        const gs = Math.max(0.6, 14 * px);
-        c.save();
-        c.translate(x, y);
-        c.rotate(an + Math.PI);
-        c.scale(gs, gs);
-        S.gull(c, t + i);
-        c.restore();
+      const viewW = vx1 - vx0;
+      const viewH = vy1 - vy0;
+      const period = 22;
+      const cycle = Math.floor(t / period);
+      const u = (t % period) / period; // 0..1 across the screen, then a pause
+      if (u < 0.7) {
+        const dir = hash(cycle, 7) < 0.5 ? 1 : -1;
+        const lane = 0.15 + hash(cycle, 3) * 0.5;
+        const gs = 0.75 * this.comp;
+        for (let i = 0; i < 2; i++) {
+          const k = (u / 0.7) * (viewW + 160 * gs) - 80 * gs - i * 22 * gs;
+          const x = dir > 0 ? vx0 + k : vx1 - k;
+          const y = vy0 + viewH * lane + i * 14 * gs + Math.sin(t * 0.9 + i) * 6 * gs;
+          S.ell(c, x + 10 * gs, y + 46 * gs, 8 * gs, 2.6 * gs, 'rgba(30,60,70,0.14)');
+          c.save();
+          c.translate(x, y);
+          c.rotate(dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+          c.scale(gs, gs);
+          S.gull(c, t * 1.3 + i);
+          c.restore();
+        }
+      }
+    }
+    // the whale surfaces now and then out in deep, clean water
+    if (s.animals.includes('whale')) {
+      const wx = this.camX + (vx1 - vx0) * 0.22;
+      const wy = vy0 + (vy1 - vy0) * 0.28;
+      if (isWater(wx, wy) && shoreY(wx) - wy > 250 && this.cleanAt(wx, wy)) {
+        const cyc = (t % 18) / 18;
+        const up = Math.min(1, cyc / 0.1) * (1 - Math.max(0, Math.min(1, (cyc - 0.5) / 0.1)));
+        const spout = cyc > 0.14 && cyc < 0.3 ? 1 : 0;
+        if (up > 0) this.at(wx, wy, 1.6 * this.comp, () => S.whale(c, t, up, spout));
       }
     }
 
@@ -1296,20 +1320,40 @@ export class Scene {
 
   private drawCritter(cr: Critter): void {
     const { c, t } = this;
-    const sc = 0.55;
+    const k = this.comp;
+    const sc = 0.55 * k;
     switch (cr.id) {
       case 'crab': this.at(cr.x, cr.y, sc, () => S.crab(c, t + cr.ph)); break;
       case 'sandpiper': this.at(cr.x, cr.y, sc, () => S.sandpiper(c, t, true), cr.dir); break;
       case 'starfish': this.at(cr.x, cr.y, sc, () => S.starfish(c, t + cr.ph)); break;
       case 'sardine':
-        for (let i = 0; i < 6; i++) this.at(cr.x + Math.cos(i * 2.4) * 7, cr.y + Math.sin(i * 1.7) * 5, 0.4, () => S.fish(c, t + i, '#e6f3f8'), cr.dir);
+        for (let i = 0; i < 6; i++) this.at(cr.x + Math.cos(i * 2.4) * 7 * k, cr.y + Math.sin(i * 1.7) * 5 * k, 0.4 * k, () => S.fish(c, t + i, '#e6f3f8'), cr.dir);
         break;
       case 'clownfish': this.at(cr.x, cr.y, sc, () => S.fish(c, t, '#ff8a3d', true), cr.dir); break;
       case 'seahorse': this.at(cr.x, cr.y, sc, () => S.seahorse(c, t)); break;
-      case 'turtle': this.at(cr.x, cr.y, 0.7, () => S.turtle(c, t), cr.dir); break;
+      case 'turtle': this.at(cr.x, cr.y, 0.7 * k, () => S.turtle(c, t), cr.dir); break;
       case 'octopus': this.at(cr.x, cr.y, sc, () => S.octopus(c, t)); break;
-      case 'dolphin': this.at(cr.x, cr.y, 0.8, () => S.dolphin(c), cr.dir); break;
-      case 'manta': c.globalAlpha = 0.8; this.at(cr.x, cr.y, 0.9, () => S.manta(c, t), cr.dir); c.globalAlpha = 1; break;
+      case 'dolphin': {
+        // leaps out of the water every few seconds
+        const ph = ((t * 0.35 + cr.ph) % 1 + 1) % 1;
+        const jump = ph < 0.25 ? Math.sin((ph / 0.25) * Math.PI) : 0;
+        if (jump <= 0.02) {
+          c.beginPath();
+          c.ellipse(cr.x, cr.y, 9 * k, 3 * k, 0, 0, TAU);
+          c.strokeStyle = 'rgba(255,255,255,0.45)';
+          c.lineWidth = 1 * k;
+          c.stroke();
+          break;
+        }
+        c.save();
+        c.translate(cr.x, cr.y - jump * 14 * k);
+        c.scale(0.8 * k * cr.dir, 0.8 * k);
+        c.rotate((ph / 0.25 - 0.5) * 1.6);
+        S.dolphin(c);
+        c.restore();
+        break;
+      }
+      case 'manta': c.globalAlpha = 0.8; this.at(cr.x, cr.y, 0.9 * k, () => S.manta(c, t), cr.dir); c.globalAlpha = 1; break;
     }
   }
 
