@@ -92,9 +92,9 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 #hint {
   position: absolute;
   left: 50%;
-  bottom: 10px;
-  transform: translateX(-50%);
-  max-width: 88%;
+  top: 22px;
+  transform: translateX(calc(-50% - 36px));
+  max-width: calc(100% - 104px);
   padding: 7px 14px;
   border-radius: 16px;
   background: rgba(255, 250, 240, 0.9);
@@ -115,7 +115,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
   box-shadow: 0 3px 0 #d99a1c, var(--shadow);
   animation: nudge 1.4s ease-in-out infinite;
 }
-@keyframes nudge { 50% { transform: translateX(-50%) translateY(-3px); } }
+@keyframes nudge { 50% { transform: translateX(calc(-50% - 36px)) translateY(3px); } }
 .sheet-open #hint.claim { pointer-events: none; }
 .sheet-open #hint { opacity: 0; }
 #minimap {
@@ -145,7 +145,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
   z-index: 2;
 }
 #life-chip:active { transform: scale(0.94); }
-#toasts { position: absolute; left: 10px; right: 10px; top: 62px; z-index: 6; display: flex; flex-direction: column; gap: 6px; pointer-events: none; align-items: center; }
+#toasts { position: absolute; left: 10px; right: 80px; top: 64px; z-index: 6; display: flex; flex-direction: column; gap: 6px; pointer-events: none; align-items: center; }
 .toast {
   display: flex;
   align-items: center;

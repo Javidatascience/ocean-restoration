@@ -71,13 +71,9 @@ scene.onTooBig = (i) => {
   const need = TOOLS[LITTER_TIER[LITTER[i]!.size]!]!;
   ui.toast('Too big to carry', `You need a ${need.name} for this one.`, '🔒');
 };
-scene.onSector = (id) => {
-  if (actions.openSector(id)) return;
+scene.onSector = () => {
   sfx.deny();
-  const why = sim.sectorBlock(state, id);
-  if (why === 'far') ui.toast('Too far', 'Open a sector next to your area first.', '🧭');
-  else if (why === 'boat') ui.toast('Sea sector', 'You need the boat to clean the sea. Buy it in Tools.', '⛵');
-  else ui.toast(`Sector ${sectorName(id)}`, `Opening it costs ${fmt(sim.sectorCost(id))} coins. Keep sweeping!`, '🧭');
+  ui.toast('The sea', 'You need the boat to clean the water. Buy it in Tools.', '⛵');
 };
 
 function bought(ok: boolean): boolean {
@@ -101,18 +97,7 @@ const actions = {
   buyHelper: (id: Parameters<typeof sim.buyHelper>[1]) => bought(sim.buyHelper(state, id)),
   buyBoat: () => {
     const ok = bought(sim.buyBoat(state));
-    if (ok) { sfx.unlock(); ui.toast('The boat is ready', 'Open a sea sector, then just drive into the water.', '⛵'); }
-    return ok;
-  },
-  openSector: (id: number) => {
-    const ok = sim.openSector(state, field, id);
-    if (ok) {
-      sfx.buy();
-      sfx.unlock();
-      scene.sectorFx(id, '255,255,255');
-      navigator.vibrate?.(15);
-      save();
-    }
+    if (ok) { sfx.unlock(); ui.toast('The boat is ready', 'Just drive into the water and start cleaning the sea.', '⛵'); }
     return ok;
   },
   goTo: (id: number) => scene.goTo((sectorCol(id) + 0.5) * SECTOR, (sectorRow(id) + 0.5) * SECTOR),

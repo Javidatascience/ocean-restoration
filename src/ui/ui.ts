@@ -3,7 +3,7 @@ import { ANIMALS, BOAT_COST, HELPERS, TOOLS, UPGRADES, type HelperId, type Upgra
 import { fmt, fmtDuration } from '../core/format.ts';
 import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
-import { LITTER, SECTOR_N, isSeaSector, sectorAt, sectorName } from '../core/world.ts';
+import { LITTER, SECTOR_N, SEA_ROWS, sectorAt, sectorName, sectorRow } from '../core/world.ts';
 import type { Scene } from '../scene/scene.ts';
 import { paintIcon } from '../scene/sprites.ts';
 
@@ -14,7 +14,6 @@ export interface UIActions {
   buyUpgrade(id: UpgradeId): boolean;
   buyHelper(id: HelperId): boolean;
   buyBoat(): boolean;
-  openSector(id: number): boolean;
   goTo(id: number): void;
   claimGoal(): number;
   toggleSound(): void;
@@ -131,7 +130,7 @@ export class UI {
 
   private sig(): string {
     const s = this.s;
-    return [this.tab, s.tool, UPGRADES.map((u) => s.upgrades[u.id]).join(','), HELPERS.map((h) => s.helpers[h.id]).join(','), s.boat, s.sectors.length, sim.doneCount(s), s.animals.length].join('|');
+    return [this.tab, s.tool, UPGRADES.map((u) => s.upgrades[u.id]).join(','), HELPERS.map((h) => s.helpers[h.id]).join(','), s.boat, sim.doneCount(s), s.animals.length].join('|');
   }
 
   private hint(): void {
@@ -155,7 +154,6 @@ export class UI {
     const flags: Record<string, boolean> = {
       tools: sim.canBuyTool(s) || UPGRADES.some((u) => sim.canBuyUpgrade(s, u.id)) || sim.canBuyBoat(s),
       helpers: HELPERS.some((h) => sim.canBuyHelper(s, h.id)),
-      map: Array.from({ length: SECTOR_N }, (_, id) => id).some((id) => sim.sectorBlock(s, id) === null),
     };
     for (const b of Array.from($('nav').querySelectorAll<HTMLElement>('[data-tab]'))) b.classList.toggle('badge', !!flags[b.dataset.tab ?? '']);
   }
@@ -202,7 +200,7 @@ export class UI {
     }).join('');
     const boat = s.boat
       ? `<div class="card"><canvas class="ico" data-icon="unit:boat"></canvas><div class="info"><div class="name">Cleanup Boat<span class="lvl">Ready</span></div><div class="desc">Drive into the water and you switch to the boat. Sea sectors pay 50% more.</div></div><div class="max">⛵</div></div>`
-      : `<div class="card feature"><canvas class="ico" data-icon="unit:boat"></canvas><div class="info"><div class="name">Cleanup Boat</div><div class="desc">The whole top of the map is sea. The boat lets you open sea sectors and clean the water.</div><div class="eff">Sea pays 50% more</div></div>${this.buyBtn('boat', BOAT_COST, 'Buy')}</div>`;
+      : `<div class="card feature"><canvas class="ico" data-icon="unit:boat"></canvas><div class="info"><div class="name">Cleanup Boat</div><div class="desc">The whole top of the map is sea. The boat lets you sail out and clean the water.</div><div class="eff">Sea pays 50% more</div></div>${this.buyBtn('boat', BOAT_COST, 'Buy')}</div>`;
     return `<div class="summary">${TOOL_ICON[s.tool]} <b>${cur.name}</b> · reach ${cur.radius} · speed ${Math.round(sim.moveSpeed(s))} · ${fmt(sim.cellValue(s, sectorAt(s.px, s.py) >= 0 ? sectorAt(s.px, s.py) : 0))} coins per patch here</div>
       <h3>Next tool</h3>${toolCard}<h3>Upgrades</h3>${ups}<h3>Sea</h3>${boat}`;
   }
@@ -217,16 +215,15 @@ export class UI {
       const maxed = n >= h.max;
       return `<div class="card"><canvas class="ico" data-icon="${icon}"></canvas><div class="info"><div class="name">${h.name}<span class="lvl">×${n}</span></div><div class="desc">${h.desc}</div><div class="eff">~${fmt(sim.sweepRate(sim.helperRadius(s), sim.HELPER_SPEED, 0.7))} patches/s each</div></div>${maxed ? '<div class="max">MAX</div>' : this.buyBtn('helper:' + h.id, sim.helperCost(s, h.id))}</div>`;
     }).join('');
-    return `<div class="summary">Your helpers sweep <b>~${fmt(total)}</b> patches/s in open sectors that are not clean yet. They get bigger brushes when you upgrade your tool, and keep working while you are away (50% speed, up to ${sim.OFFLINE_CAP / 3600} h).</div>${cards}`;
+    return `<div class="summary">Your helpers sweep <b>~${fmt(total)}</b> patches/s in the unfinished sectors closest to you. They get bigger brushes when you upgrade your tool, and keep working while you are away (50% speed, up to ${sim.OFFLINE_CAP / 3600} h).</div>${cards}`;
   }
 
   private map(): string {
     const s = this.s;
     return `<div class="mapwrap"><canvas class="bigmap" data-act="map"></canvas></div>
-      <p class="maphelp">Tap a sector with a gold frame to open it, or an open one to walk there.</p>
+      <p class="maphelp">Tap a sector to walk (or sail) there.</p>
       <div class="rows">
-        <div class="row">🧭 Sectors open <b>${s.sectors.length}/${SECTOR_N}</b></div>
-        <div class="row">✨ Sectors clean <b>${sim.doneCount(s)}</b></div>
+        <div class="row">✨ Sectors clean <b>${sim.doneCount(s)}/${SECTOR_N}</b></div>
         <div class="row">🧴 Litter picked up <b>${s.picked}/${LITTER.length}</b></div>
         <button type="button" class="row" data-act="sound">${s.sound ? '🔊 Sound on' : '🔇 Sound off'}</button>
         <button type="button" class="row danger" data-act="reset">Start over</button>
@@ -237,20 +234,13 @@ export class UI {
     const b = cv.getBoundingClientRect();
     const id = this.scene.mapSector(cv, e.clientX - b.left, e.clientY - b.top);
     if (id < 0) return;
-    if (this.s.sectors.includes(id)) {
-      this.act.goTo(id);
-      this.open('beach');
+    if (sim.seaLocked(this.s, id) && sectorRow(id) < SEA_ROWS - 1) {
+      this.act.denied();
+      this.toast('The sea', 'Buy the boat in Tools to sail out there.', '⛵');
       return;
     }
-    const why = sim.sectorBlock(this.s, id);
-    if (why === null) {
-      if (this.act.openSector(id)) this.render();
-      return;
-    }
-    this.act.denied();
-    if (why === 'far') this.toast('Too far', 'Open a sector next to your area first.', '🧭');
-    else if (why === 'boat') this.toast('Sea sector', 'Buy the boat in Tools to open the sea.', '⛵');
-    else this.toast(`Sector ${sectorName(id)}`, `Opening it costs ${fmt(sim.sectorCost(id))} coins${isSeaSector(id) ? ' (sea pays 50% more)' : ''}.`, '🧭');
+    this.act.goTo(id);
+    this.open('beach');
   }
 
   private life(): string {

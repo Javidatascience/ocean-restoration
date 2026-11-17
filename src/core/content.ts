@@ -15,14 +15,14 @@ export interface ToolDef {
 export const TOOLS: ToolDef[] = [
   { name: 'Dustpan', desc: 'A tiny dustpan and brush. Every journey starts somewhere.', radius: 4, speed: 1, cost: 0, look: 'hand' },
   { name: 'Hand Broom', desc: 'A proper broom. Twice the reach of the dustpan.', radius: 6, speed: 1, cost: 150, look: 'hand' },
-  { name: 'Beach Rake', desc: 'Wide teeth that comb the sand clean in one pass.', radius: 9, speed: 1.05, cost: 1500, look: 'hand' },
-  { name: 'Push Sweeper', desc: 'Spinning brushes on wheels. Push and watch the sand shine.', radius: 13, speed: 1.1, cost: 14000, look: 'hand' },
-  { name: 'Sand Sifter', desc: 'A little electric machine that sifts the sand as it rolls.', radius: 18, speed: 1.25, cost: 100000, look: 'machine' },
-  { name: 'Buggy Sweeper', desc: 'A beach buggy with a sweeper bar bolted on the front.', radius: 25, speed: 1.4, cost: 800000, look: 'machine' },
-  { name: 'Tractor Rake', desc: 'A tractor towing a huge rake. Whole dunes in minutes.', radius: 34, speed: 1.6, cost: 5e6, look: 'machine' },
-  { name: 'Sweeper Truck', desc: 'An industrial street sweeper, retrofitted for sand.', radius: 46, speed: 1.8, cost: 2.5e7, look: 'machine' },
-  { name: 'Mega Sifter', desc: 'A rolling factory that leaves the beach spotless.', radius: 62, speed: 2, cost: 7e7, look: 'machine' },
-  { name: 'Titan Cleaner', desc: 'The biggest beach cleaner ever built.', radius: 84, speed: 2.2, cost: 2.2e8, look: 'machine' },
+  { name: 'Beach Rake', desc: 'Wide teeth that comb the sand clean in one pass.', radius: 9, speed: 1.05, cost: 1200, look: 'hand' },
+  { name: 'Push Sweeper', desc: 'Spinning brushes on wheels. Push and watch the sand shine.', radius: 13, speed: 1.1, cost: 8000, look: 'hand' },
+  { name: 'Sand Sifter', desc: 'A little electric machine that sifts the sand as it rolls.', radius: 18, speed: 1.25, cost: 45000, look: 'machine' },
+  { name: 'Buggy Sweeper', desc: 'A beach buggy with a sweeper bar bolted on the front.', radius: 25, speed: 1.4, cost: 250000, look: 'machine' },
+  { name: 'Tractor Rake', desc: 'A tractor towing a huge rake. Whole dunes in minutes.', radius: 34, speed: 1.6, cost: 1.4e6, look: 'machine' },
+  { name: 'Sweeper Truck', desc: 'An industrial street sweeper, retrofitted for sand.', radius: 46, speed: 1.8, cost: 7e6, look: 'machine' },
+  { name: 'Mega Sifter', desc: 'A rolling factory that leaves the beach spotless.', radius: 62, speed: 2, cost: 3.5e7, look: 'machine' },
+  { name: 'Titan Cleaner', desc: 'The biggest beach cleaner ever built.', radius: 84, speed: 2.2, cost: 1.6e8, look: 'machine' },
 ];
 
 export type UpgradeId = 'boots' | 'sorting' | 'magnet';
@@ -43,7 +43,7 @@ export const UPGRADES: UpgradeDef[] = [
   { id: 'magnet', name: 'Trash Magnet', icon: '🧲', desc: 'Pulls nearby pieces of litter towards you. Bigger pull per level.', baseCost: 400, growth: 3, max: 6 },
 ];
 
-/** The boat opens the sea sectors. */
+/** The boat lets you clean the sea. */
 export const BOAT_COST = 40000;
 
 export type HelperId = 'bot' | 'drone';
@@ -60,8 +60,8 @@ export interface HelperDef {
 }
 
 export const HELPERS: HelperDef[] = [
-  { id: 'bot', name: 'Sand Bot', desc: 'A little robot that cleans open beach sectors on its own, even while you are away.', baseCost: 600, growth: 1.6, max: 20, sea: false },
-  { id: 'drone', name: 'Sea Drone', desc: 'Skims the water in open sea sectors, all day and all night.', baseCost: 60000, growth: 1.6, max: 20, sea: true },
+  { id: 'bot', name: 'Sand Bot', desc: 'A little robot that cleans the beach sectors near you on its own, even while you are away.', baseCost: 600, growth: 1.6, max: 20, sea: false },
+  { id: 'drone', name: 'Sea Drone', desc: 'Skims the water in the sea sectors near you, all day and all night.', baseCost: 60000, growth: 1.6, max: 20, sea: true },
 ];
 
 export interface AnimalDef {
@@ -91,7 +91,7 @@ export const ANIMALS: AnimalDef[] = [
 
 export interface GoalDef {
   text: string;
-  type: 'cleaned' | 'tool' | 'upgrade' | 'sectors' | 'done' | 'helper' | 'boat' | 'pct' | 'items';
+  type: 'cleaned' | 'tool' | 'upgrade' | 'done' | 'helper' | 'boat' | 'pct' | 'items';
   id?: string;
   n: number;
   reward: number;
@@ -104,14 +104,14 @@ export const GOALS: GoalDef[] = [
   { text: 'Pick up 3 pieces of litter', type: 'items', n: 3, reward: 80 },
   { text: 'Quick Boots to Lv 2', type: 'upgrade', id: 'boots', n: 2, reward: 120 },
   { text: 'Sweep the first sector clean', type: 'done', n: 1, reward: 300 },
-  { text: 'Open a new sector', type: 'sectors', n: 2, reward: 400 },
+  { text: 'Sweep 5,000 patches of dirt', type: 'cleaned', n: 5000, reward: 400 },
   { text: 'Buy a Beach Rake', type: 'tool', n: 2, reward: 600 },
   { text: 'Build a Sand Bot', type: 'helper', id: 'bot', n: 1, reward: 800 },
   { text: 'Clean 3 sectors', type: 'done', n: 3, reward: 2000 },
   { text: 'Sorting Skills to Lv 5', type: 'upgrade', id: 'sorting', n: 5, reward: 3000 },
   { text: 'Buy a Push Sweeper', type: 'tool', n: 3, reward: 5000 },
   { text: 'Clean 5% of the coast', type: 'pct', n: 5, reward: 8000 },
-  { text: 'Open 8 sectors', type: 'sectors', n: 8, reward: 15000 },
+  { text: 'Pick up 40 pieces of litter', type: 'items', n: 40, reward: 15000 },
   { text: 'Buy the boat', type: 'boat', n: 1, reward: 25000 },
   { text: 'Buy a Sand Sifter', type: 'tool', n: 4, reward: 40000 },
   { text: 'Build a Sea Drone', type: 'helper', id: 'drone', n: 1, reward: 60000 },

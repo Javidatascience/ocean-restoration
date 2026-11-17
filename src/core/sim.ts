@@ -3,7 +3,7 @@ import { ANIMALS, BOAT_COST, GOALS, HELPERS, TOOLS, UPGRADES, type GoalDef, type
 import { DIRT_CELLS, LITTER_N, decodeBits, encodeBits, type GameState } from './state.ts';
 import {
   CELL, CELLS_PER_SECTOR, DONE_FRACTION, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SEA_ROWS, SCOLS,
-  isSeaSector, isWaterCell, neighbours, ring, sectorOfCell, sectorRow,
+  isSeaSector, isWaterCell, sectorOfCell, sectorRow,
 } from './world.ts';
 
 export type GameEvent =
@@ -33,9 +33,9 @@ export class Field {
     }
     this.syncOpen(s);
   }
-  syncOpen(s: GameState): void {
-    this.open.fill(0);
-    for (const id of s.sectors) this.open[id] = 1;
+  /** Every sector is open; the sea just needs the boat to reach it. */
+  syncOpen(_s: GameState): void {
+    this.open.fill(1);
   }
   store(s: GameState): void {
     s.dirt = encodeBits(this.dirt);
@@ -61,12 +61,17 @@ export function moveSpeed(s: GameState, onWater = false): number {
   const v = 42 * tool(s).speed * (1 + 0.12 * s.upgrades.boots);
   return onWater ? v * 0.95 : v;
 }
-export function coinMult(s: GameState): number {
-  return 1 + 0.15 * s.upgrades.sorting;
+/** Each sector you sweep clean raises what every patch pays, for good. */
+export const SECTOR_BOOST = 1.03;
+export function sectorBoost(s: GameState): number {
+  return Math.pow(SECTOR_BOOST, doneCount(s));
 }
-/** Base coins per dirt cell in a sector, before Sorting Skills. Further and wetter pays more. */
+export function coinMult(s: GameState): number {
+  return (1 + 0.15 * s.upgrades.sorting) * sectorBoost(s);
+}
+/** Base coins per dirt cell in a sector: the sea pays 50% more. */
 export function cellBase(id: number): number {
-  return Math.pow(1.25, ring(id)) * (isSeaSector(id) ? 1.5 : 1);
+  return isSeaSector(id) ? 1.5 : 1;
 }
 export function cellValue(s: GameState, id: number): number {
   return cellBase(id) * coinMult(s);
@@ -156,22 +161,9 @@ export function buyBoat(s: GameState): boolean {
   return true;
 }
 
-export function sectorCost(id: number): number {
-  return Math.round(sectorValue(id) * 0.35);
-}
-export type SectorBlock = 'owned' | 'far' | 'boat' | 'coins' | null;
-export function sectorBlock(s: GameState, id: number): SectorBlock {
-  if (s.sectors.includes(id)) return 'owned';
-  if (!neighbours(id).some((n) => s.sectors.includes(n))) return 'far';
-  if (isSeaSector(id) && !s.boat) return 'boat';
-  return s.coins >= sectorCost(id) ? null : 'coins';
-}
-export function openSector(s: GameState, f: Field | null, id: number): boolean {
-  if (sectorBlock(s, id) !== null) return false;
-  s.coins -= sectorCost(id);
-  s.sectors.push(id);
-  f?.syncOpen(s);
-  return true;
+/** Sea sectors need the boat. */
+export function seaLocked(s: GameState, id: number): boolean {
+  return isSeaSector(id) && !s.boat;
 }
 
 // ---- sweeping ---------------------------------------------------------------------
@@ -298,9 +290,19 @@ export function doneCount(s: GameState): number {
 
 // ---- helpers working (live and offline) ---------------------------------------------
 
-/** Sectors a helper can work in: open, not finished, with terrain it can clean. */
+/** Sectors a helper works in: the closest ones to the player that are not finished and have terrain it can clean. */
 export function helperSectors(s: GameState, f: Field, sea: boolean): number[] {
-  return s.sectors.filter((id) => !s.done.includes(id) && f.left[id]! > 0 && (sea ? sectorRow(id) < SEA_ROWS : sectorRow(id) >= SEA_ROWS - 1));
+  if (sea && !s.boat) return [];
+  const out: { id: number; d: number }[] = [];
+  for (let id = 0; id < SECTOR_N; id++) {
+    if (f.left[id]! <= 0 || s.done.includes(id)) continue;
+    if (sea ? sectorRow(id) >= SEA_ROWS : sectorRow(id) < SEA_ROWS - 1) continue;
+    const dx = ((id % SCOLS) + 0.5) * SECTOR - s.px;
+    const dy = (sectorRow(id) + 0.5) * SECTOR - s.py;
+    out.push({ id, d: dx * dx + dy * dy });
+  }
+  out.sort((a, b) => a.d - b.d);
+  return out.slice(0, 4).map((o) => o.id);
 }
 
 /** Pick a random dirty cell (world position) in one of the sectors a helper works in. */
@@ -314,6 +316,27 @@ export function helperTarget(s: GameState, f: Field, sea: boolean, rand: () => n
     if (f.dirt[gy * GW + gx] && isWaterCell(gx, gy) === sea) return { x: gx * CELL + CELL / 2, y: gy * CELL + CELL / 2 };
   }
   return null;
+}
+
+/** Is there dirt a helper of this kind can clean in the lane at height y (sweep radius r) of a sector? */
+export function laneDirty(f: Field, sec: number, y: number, r: number, sea: boolean): boolean {
+  const gx0 = ((sec % SCOLS) * SECTOR) / CELL;
+  const gy0 = Math.max(Math.floor((sectorRow(sec) * SECTOR) / CELL), Math.floor((y - r) / CELL));
+  const gy1 = Math.min(Math.floor(((sectorRow(sec) + 1) * SECTOR) / CELL) - 1, Math.floor((y + r) / CELL));
+  for (let gy = gy0; gy <= gy1; gy++) {
+    for (let gx = gx0; gx < gx0 + SECTOR / CELL; gx++) {
+      if (f.dirt[gy * GW + gx] && isWaterCell(gx, gy) === sea) return true;
+    }
+  }
+  return false;
+}
+
+/** Lane heights a helper of radius r uses to comb a sector. */
+export function lanes(sec: number, r: number): number[] {
+  const y0 = sectorRow(sec) * SECTOR;
+  const out: number[] = [];
+  for (let y = y0 + r * 0.7; y < y0 + SECTOR + r * 0.5; y += r * 1.4) out.push(Math.min(y, y0 + SECTOR - 1));
+  return out;
 }
 
 export interface OfflineReport {
@@ -331,18 +354,28 @@ export function applyOffline(s: GameState, f: Field, elapsedSeconds: number, ran
   const seconds = Math.max(0, Math.min(elapsedSeconds, OFFLINE_CAP));
   const report: OfflineReport = { seconds, capped: elapsedSeconds > OFFLINE_CAP, cells: 0, coins: 0, events: [] };
   const r = helperRadius(s);
+  void rand;
+  // Helpers comb the nearest unfinished sectors in tidy lanes, one sector after another.
   for (const h of HELPERS) {
     let budget = helperRate(s, h.id) * seconds * OFFLINE_EFFICIENCY;
-    let misses = 0;
-    while (budget > 0 && misses < 200) {
-      const p = helperTarget(s, f, h.sea, rand);
-      if (!p) break;
-      const res = sweep(s, f, p.x, p.y, r, { land: !h.sea, sea: h.sea });
-      if (res.cells === 0) { misses++; continue; }
-      budget -= res.cells;
-      report.cells += res.cells;
-      report.coins += res.coins;
-      report.events.push(...res.events);
+    const skip = new Set<number>();
+    const reach = { land: !h.sea, sea: h.sea };
+    while (budget > 0) {
+      const sec = helperSectors(s, f, h.sea).find((id) => !skip.has(id));
+      if (sec === undefined) break;
+      skip.add(sec); // one full pass per sector; leftovers are picked up next time
+      const x0 = (sec % SCOLS) * SECTOR;
+      for (const y of lanes(sec, r)) {
+        if (budget <= 0 || s.done.includes(sec)) break;
+        if (!laneDirty(f, sec, y, r, h.sea)) continue;
+        for (let x = x0 + r * 0.5; x <= x0 + SECTOR; x += Math.max(1, r * 0.7)) {
+          const res = sweep(s, f, x, y, r, reach);
+          budget -= res.cells;
+          report.cells += res.cells;
+          report.coins += res.coins;
+          report.events.push(...res.events);
+        }
+      }
     }
   }
   return report;
@@ -360,7 +393,6 @@ export function goalStatus(s: GameState, f: Field): GoalStatus | null {
     case 'cleaned': cur = s.cleaned; break;
     case 'tool': cur = s.tool; break;
     case 'upgrade': cur = s.upgrades[def.id as UpgradeId]; break;
-    case 'sectors': cur = s.sectors.length; break;
     case 'done': cur = doneCount(s); break;
     case 'helper': cur = s.helpers[def.id as HelperId]; break;
     case 'boat': cur = s.boat ? 1 : 0; break;

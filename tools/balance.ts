@@ -1,5 +1,5 @@
 // Bot that plays the real rules on the real dirt grid and prints a timeline. Run: npm run balance
-// It sweeps sectors in lanes, picks up litter, buys tools / upgrades / helpers / sectors greedily.
+// It sweeps sectors in lanes, picks up litter, buys tools / upgrades / helpers greedily.
 import { HELPERS, TOOLS, UPGRADES } from '../src/core/content.ts';
 import * as sim from '../src/core/sim.ts';
 import { newState } from '../src/core/state.ts';
@@ -20,9 +20,11 @@ const marks = [1, 5, 10, 25, 50, 75, 90, 100];
 const log = (msg: string) => console.log(`${(t / 60).toFixed(1).padStart(6)} min  ${sim.pct(f).toFixed(1).padStart(5)}%  ${msg}`);
 
 function pickTarget(): void {
-  const open = s.sectors.filter((id) => !s.done.includes(id));
-  open.sort((a, b) => sim.cellBase(b) - sim.cellBase(a));
-  const next = open[0] ?? -1;
+  // the best value for the walk: pricier sectors, but not too far away
+  const score = (id: number) => 1 / (1 + Math.hypot(((id % SCOLS) + 0.5) * SECTOR - x, (Math.floor(id / SCOLS) + 0.5) * SECTOR - y) / 600);
+  const open = Array.from({ length: SECTOR_N }, (_, id) => id).filter((id) => !s.done.includes(id) && !sim.seaLocked(s, id));
+  open.sort((a, b) => score(b) - score(a));
+  const next = target >= 0 && !s.done.includes(target) ? target : (open[0] ?? -1);
   if (next !== target) {
     if (next >= 0) {
       const nx = (next % SCOLS) * SECTOR;
@@ -49,17 +51,12 @@ function buy(): void {
     for (const h of HELPERS) {
       if (sim.helperCost(s, h.id) < Math.min(s.coins * 0.2, nextToolCost * 0.15) && sim.buyHelper(s, h.id)) again = true;
     }
-    const undone = s.sectors.filter((id) => !s.done.includes(id)).length;
-    if (undone < 2) {
-      const options = Array.from({ length: SECTOR_N }, (_, id) => id).filter((id) => sim.sectorBlock(s, id) === null);
-      options.sort((a, b) => sim.sectorCost(a) - sim.sectorCost(b));
-      if (options[0] !== undefined && sim.openSector(s, f, options[0])) again = true;
-    }
     if (again) lastBuy = t;
   }
 }
 
 while (sim.pct(f) < 99.9 && t < 12 * 3600) {
+  s.px = x; s.py = y;
   pickTarget();
   if (target >= 0) {
     // Lane sweep inside the target sector.
@@ -93,7 +90,7 @@ while (sim.pct(f) < 99.9 && t < 12 * 3600) {
   }
   buy();
   if (t - lastBuy > worstGap) worstGap = t - lastBuy;
-  while (marks.length && sim.pct(f) >= marks[0]!) log(`=== ${marks.shift()}% · sectors ${s.sectors.length} done ${sim.doneCount(s)} · helpers ${s.helpers.bot}/${s.helpers.drone} · ups ${UPGRADES.map((u) => s.upgrades[u.id]).join('/')}`);
+  while (marks.length && sim.pct(f) >= marks[0]!) log(`=== ${marks.shift()}% · done ${sim.doneCount(s)} · helpers ${s.helpers.bot}/${s.helpers.drone} · ups ${UPGRADES.map((u) => s.upgrades[u.id]).join('/')}`);
   t += dt;
 }
 log(`end · longest wait between purchases ${(worstGap / 60).toFixed(1)} min · coins ${s.coins.toExponential(2)}`);

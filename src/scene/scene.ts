@@ -5,7 +5,7 @@ import * as sim from '../core/sim.ts';
 import type { GameState } from '../core/state.ts';
 import {
   CELL, GH, GW, LITTER, LITTER_RADIUS, LITTER_TIER, SECTOR, SECTOR_N, SCOLS, SROWS, WORLD_H, WORLD_W,
-  isSeaSector, isWater, isWaterCell, neighbours, sectorAt, shoreY,
+  isSeaSector, isWater, isWaterCell, sectorAt, sectorName, shoreY,
 } from '../core/world.ts';
 import * as S from './sprites.ts';
 
@@ -15,7 +15,7 @@ const TAU = Math.PI * 2;
 interface Particle { x: number; y: number; vx: number; vy: number; t: number; life: number; color: string; r: number }
 interface Popup { x: number; y: number; text: string; color: string; t: number; size: number }
 interface Flyer { i: number; x: number; y: number; t: number }
-interface Helper { x: number; y: number; tx: number; ty: number; sea: boolean; ph: number; dir: number; idle: number }
+interface Helper { x: number; y: number; tx: number; ty: number; sea: boolean; ph: number; dir: number; idle: number; sec: number; lane: number; turning: boolean; skip: number }
 interface Critter { id: string; x: number; y: number; tx: number; ty: number; ph: number; dir: number; wait: number }
 interface Decor { x: number; y: number; kind: number; s: number; ph: number }
 
@@ -303,9 +303,8 @@ export class Scene {
 
   private tap(sx: number, sy: number): void {
     const w = this.toWorld(sx, sy);
-    const id = sectorAt(w.x, w.y);
-    if (id >= 0 && !this.s.sectors.includes(id)) {
-      this.onSector(id);
+    if (isWater(w.x, w.y) && !this.s.boat) {
+      this.onSector(sectorAt(w.x, w.y));
       return;
     }
     if (this.allowed(w.x, w.y)) this.target = w;
@@ -487,7 +486,7 @@ export class Scene {
       let have = this.helpers.filter((h) => h.sea === sea).length;
       while (have < want) {
         const p = sim.helperTarget(s, this.f, sea) ?? { x: s.px, y: s.py };
-        this.helpers.push({ x: p.x, y: p.y, tx: p.x, ty: p.y, sea, ph: Math.random() * TAU, dir: 1, idle: 0 });
+        this.helpers.push({ x: p.x, y: p.y, tx: p.x, ty: p.y, sea, ph: Math.random() * TAU, dir: 1, idle: 0, sec: -1, lane: 0, turning: false, skip: -1 });
         have++;
       }
     }
@@ -498,11 +497,7 @@ export class Scene {
       const d = Math.hypot(dx, dy);
       if (d < 2) {
         h.idle -= dt;
-        // look for dirt right next to us first, then anywhere in our sectors
-        const near = this.nearDirt(h.x, h.y, h.sea, r * 6);
-        const p = near ?? (h.idle <= 0 ? sim.helperTarget(s, this.f, h.sea) : null);
-        if (p) { h.tx = p.x; h.ty = p.y; }
-        else if (h.idle <= 0) h.idle = 2;
+        if (h.idle <= 0) this.nextLane(h, r);
       } else {
         const step = Math.min(d, sim.HELPER_SPEED * dt);
         h.x += (dx / d) * step;
@@ -513,19 +508,42 @@ export class Scene {
     }
   }
 
-  /** A random dirty cell close to a point, in an open sector of the right terrain. */
-  private nearDirt(x: number, y: number, sea: boolean, range: number): { x: number; y: number } | null {
-    for (let i = 0; i < 12; i++) {
-      const px = x + (Math.random() - 0.5) * range * 2;
-      const py = y + (Math.random() - 0.5) * range * 2;
-      const gx = Math.floor(px / CELL);
-      const gy = Math.floor(py / CELL);
-      if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) continue;
-      const id = sectorAt(px, py);
-      if (id < 0 || !this.f.open[id] || this.s.done.includes(id)) continue;
-      if (this.f.dirt[gy * GW + gx] && isWaterCell(gx, gy) === sea) return { x: px, y: py };
+  /** Helpers comb a sector in tidy back-and-forth lanes, then move on to the next unfinished one. */
+  private nextLane(h: Helper, r: number): void {
+    const s = this.s;
+    const needSector = h.sec < 0 || s.done.includes(h.sec) || this.f.left[h.sec]! <= 0;
+    if (needSector) {
+      const taken = new Set(this.helpers.filter((o) => o !== h && o.sea === h.sea).map((o) => o.sec));
+      const options = sim.helperSectors(s, this.f, h.sea).filter((id) => id !== h.skip);
+      const sec = options.find((id) => !taken.has(id)) ?? options[0];
+      if (sec === undefined) { h.idle = 2; h.sec = -1; return; }
+      h.sec = sec;
+      h.lane = 0;
+      h.turning = false;
     }
-    return null;
+    const ys = sim.lanes(h.sec, r);
+    const x0 = (h.sec % SCOLS) * SECTOR;
+    if (h.turning) {
+      // reached the lane start: sweep across to the other side
+      h.turning = false;
+      h.tx = h.dir > 0 ? x0 + SECTOR - r * 0.5 : x0 + r * 0.5;
+      return;
+    }
+    // finished a lane (or just arrived): find the next lane that still has dirt for us
+    let lane = needSector ? 0 : h.lane + 1;
+    while (lane < ys.length && !sim.laneDirty(this.f, h.sec, ys[lane]!, r, h.sea)) lane++;
+    if (lane >= ys.length) {
+      // nothing left we can clean here (maybe only the other terrain): try another sector
+      h.skip = h.sec;
+      h.sec = -1;
+      h.idle = 0.2;
+      return;
+    }
+    h.lane = lane;
+    h.dir = Math.abs(h.x - x0) < Math.abs(h.x - (x0 + SECTOR)) ? 1 : -1;
+    h.tx = h.dir > 0 ? x0 + r * 0.5 : x0 + SECTOR - r * 0.5;
+    h.ty = ys[lane]!;
+    h.turning = true;
   }
 
   private cleanAt(x: number, y: number): boolean {
@@ -690,40 +708,31 @@ export class Scene {
     c.lineWidth = 1.5;
     c.stroke();
 
-    // --- locked sectors: dimmed, with a rope fence along the border of the open area
+    // --- the sea stays hazy until you have a boat
+    if (!s.boat && shoreY(this.camX) > vy0 - 200) {
+      c.beginPath();
+      c.moveTo(vx0 - 10, vy0 - 10);
+      for (let x = vx0 - 10; x <= vx1 + step + 10; x += step) c.lineTo(x, shoreY(x) - 3);
+      c.lineTo(vx1 + step + 10, vy0 - 10);
+      c.closePath();
+      c.fillStyle = 'rgba(28,46,56,0.3)';
+      c.fill();
+    }
+
+    // --- sector borders: a dotted line, so you always know where one sector ends and the next begins
     const sc0 = Math.max(0, Math.floor(vx0 / SECTOR));
     const sc1 = Math.min(SCOLS - 1, Math.floor(vx1 / SECTOR));
     const sr0 = Math.max(0, Math.floor(vy0 / SECTOR));
     const sr1 = Math.min(SROWS - 1, Math.floor(vy1 / SECTOR));
-    for (let row = sr0; row <= sr1; row++) {
-      for (let col = sc0; col <= sc1; col++) {
-        const id = row * SCOLS + col;
-        if (this.f.open[id]) continue;
-        c.fillStyle = 'rgba(28,46,56,0.38)';
-        c.fillRect(col * SECTOR, row * SECTOR, SECTOR, SECTOR);
-      }
-    }
-    c.setLineDash([6 * px, 5 * px]);
-    c.lineWidth = 2.2 * px;
-    c.strokeStyle = 'rgba(255,240,210,0.9)';
-    for (let row = sr0; row <= sr1; row++) {
-      for (let col = sc0; col <= sc1; col++) {
-        const id = row * SCOLS + col;
-        if (!this.f.open[id]) continue;
-        const x = col * SECTOR;
-        const y = row * SECTOR;
-        const edge = (nid: number, inside: boolean, x0: number, y0: number, x1: number, y1: number) => {
-          if (inside && this.f.open[nid]) return;
-          c.beginPath();
-          c.moveTo(x0, y0);
-          c.lineTo(x1, y1);
-          c.stroke();
-        };
-        edge(id - SCOLS, row > 0, x, y, x + SECTOR, y);
-        edge(id + SCOLS, row < SROWS - 1, x, y + SECTOR, x + SECTOR, y + SECTOR);
-        edge(id - 1, col > 0, x, y, x, y + SECTOR);
-        edge(id + 1, col < SCOLS - 1, x + SECTOR, y, x + SECTOR, y + SECTOR);
-      }
+    c.lineCap = 'round';
+    for (const [col, width] of [['rgba(30,50,60,0.35)', 4.2], ['rgba(255,255,255,0.9)', 2.4]] as const) {
+      c.setLineDash([0.01, 9 * px]);
+      c.strokeStyle = col;
+      c.lineWidth = width * px;
+      c.beginPath();
+      for (let cx = sc0; cx <= sc1 + 1; cx++) { if (cx === 0 || cx === SCOLS) continue; c.moveTo(cx * SECTOR, vy0); c.lineTo(cx * SECTOR, vy1); }
+      for (let ry = sr0; ry <= sr1 + 1; ry++) { if (ry === 0 || ry === SROWS) continue; c.moveTo(vx0, ry * SECTOR); c.lineTo(vx1, ry * SECTOR); }
+      c.stroke();
     }
     c.setLineDash([]);
 
@@ -946,55 +955,57 @@ export class Scene {
     }
   }
 
-  /** Price signs over the locked sectors you can open next. Drawn in screen space so they stay readable. */
+  /** A small tag in the corner of every sector on screen (name and how clean it is), and a boat hint at sea. */
   private drawSigns(sc0: number, sc1: number, sr0: number, sr1: number): void {
     const c = this.c;
     const z = this.zoom;
-    c.textAlign = 'center';
-    c.textBaseline = 'middle';
     const vx0 = this.camX - this.W / 2 / z;
-    const vx1 = this.camX + this.W / 2 / z;
     const vy0 = this.camY - this.H / 2 / z;
-    const vy1 = this.camY + this.H / 2 / z;
+    c.textBaseline = 'middle';
+    c.font = '800 11px ui-rounded, "Nunito", system-ui, sans-serif';
     for (let row = sr0; row <= sr1; row++) {
       for (let col = sc0; col <= sc1; col++) {
         const id = row * SCOLS + col;
-        if (this.f.open[id]) continue;
-        const block = sim.sectorBlock(this.s, id);
-        if (block === 'far') continue;
-        const text = block === 'boat' ? '⛵ Needs the boat' : `🔒 Open · ${fmtShort(sim.sectorCost(id))}`;
-        c.font = '800 13px ui-rounded, "Nunito", system-ui, sans-serif';
-        const w = c.measureText(text).width + 22;
-        // the part of the sector that is on screen; skip the sign if it would not fit there
-        const a = this.toScreen(Math.max(col * SECTOR, vx0), Math.max(row * SECTOR, vy0));
-        const b = this.toScreen(Math.min((col + 1) * SECTOR, vx1), Math.min((row + 1) * SECTOR, vy1));
-        const top = Math.max(a.y, 8);
-        const bottom = Math.min(b.y, this.H - 64); // keep clear of the goal chip
-        if (b.x - a.x < w + 12 || bottom - top < 40) continue;
-        const centre = this.toScreen((col + 0.5) * SECTOR, (row + 0.5) * SECTOR);
-        const p = { x: clamp(centre.x, a.x + w / 2 + 6, b.x - w / 2 - 6), y: clamp(centre.y, top + 20, bottom - 20) };
-        // stay out from under the minimap
-        if (p.x + w / 2 > this.W - 84 && p.y < 170) {
-          if (bottom - 20 < 170) continue;
-          p.y = 170;
-        }
-        const afford = block === null;
-        c.fillStyle = afford ? 'rgba(255,214,90,0.96)' : 'rgba(255,250,240,0.92)';
+        const done = this.s.done.includes(id);
+        const text = done ? `${sectorName(id)} ✓` : `${sectorName(id)} · ${Math.floor(this.f.sectorClean(id) * 100)}%`;
+        const w = c.measureText(text).width + 14;
+        // pin the tag to the sector's top-left corner, sliding it along while the corner is off screen
+        const corner = this.toScreen(Math.max(col * SECTOR, vx0), Math.max(row * SECTOR, vy0));
+        const end = this.toScreen((col + 1) * SECTOR, (row + 1) * SECTOR);
+        const x = corner.x + 6;
+        const y = Math.max(corner.y + 6, 56); // below the goal bar
+        if (x + w > end.x - 4 || y + 20 > end.y - 4) continue;
+        if (x + w > this.W - 80 && y < 160) continue; // under the minimap
+        c.fillStyle = done ? 'rgba(46,170,120,0.85)' : 'rgba(20,50,62,0.55)';
         c.beginPath();
-        c.roundRect(p.x - w / 2, p.y - 15, w, 30, 15);
+        c.roundRect(x, y, w, 20, 10);
         c.fill();
-        c.strokeStyle = afford ? '#d99a1c' : 'rgba(35,64,77,0.25)';
-        c.lineWidth = 1.5;
-        c.stroke();
-        c.fillStyle = afford ? '#5a3d00' : '#23404d';
-        c.fillText(text, p.x, p.y + 0.5);
+        c.fillStyle = '#fff';
+        c.textAlign = 'left';
+        c.fillText(text, x + 7, y + 10.5);
       }
     }
+    if (!this.s.boat) {
+      const sy = this.toScreen(this.camX, shoreY(this.camX) - 60).y;
+      if (sy > 70 && sy < this.H - 40) {
+        const text = '⛵ The sea needs a boat';
+        c.font = '800 13px ui-rounded, "Nunito", system-ui, sans-serif';
+        const w = c.measureText(text).width + 22;
+        c.fillStyle = 'rgba(255,250,240,0.92)';
+        c.beginPath();
+        c.roundRect(this.W / 2 - w / 2, sy - 15, w, 30, 15);
+        c.fill();
+        c.fillStyle = '#23404d';
+        c.textAlign = 'center';
+        c.fillText(text, this.W / 2, sy + 0.5);
+      }
+    }
+    c.textAlign = 'center';
   }
 
   // ---- minimap ----------------------------------------------------------------
 
-  /** Draws the whole coast into a small canvas: dirt, locked sectors, the player and the camera view. */
+  /** Draws the whole coast into a small canvas: dirt, the player and the camera view. */
   drawMap(cv: HTMLCanvasElement, detail = false): void {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const w = cv.clientWidth;
@@ -1015,16 +1026,20 @@ export class Scene {
     c.fill();
     c.imageSmoothingEnabled = true;
     c.drawImage(this.dirtCv, 0, 0, WORLD_W, WORLD_H);
-    for (let id = 0; id < SECTOR_N; id++) {
-      if (this.f.open[id]) continue;
-      const x = (id % SCOLS) * SECTOR;
-      const y = Math.floor(id / SCOLS) * SECTOR;
-      c.fillStyle = 'rgba(25,40,50,0.5)';
-      c.fillRect(x, y, SECTOR, SECTOR);
-      if (detail && sim.sectorBlock(this.s, id) === null) {
-        c.strokeStyle = '#ffd24a';
-        c.lineWidth = 18;
-        c.strokeRect(x + 12, y + 12, SECTOR - 24, SECTOR - 24);
+    if (!this.s.boat) {
+      c.beginPath();
+      c.moveTo(0, 0);
+      for (let x = 0; x <= WORLD_W; x += 40) c.lineTo(x, shoreY(x));
+      c.lineTo(WORLD_W, 0);
+      c.closePath();
+      c.fillStyle = 'rgba(25,40,50,0.35)';
+      c.fill();
+    }
+    if (detail) {
+      for (const id of this.s.done) {
+        if (id < 0) continue;
+        c.fillStyle = 'rgba(80,220,160,0.25)';
+        c.fillRect((id % SCOLS) * SECTOR, Math.floor(id / SCOLS) * SECTOR, SECTOR, SECTOR);
       }
     }
     if (detail) {
@@ -1050,10 +1065,6 @@ export class Scene {
   /** Sector under a point of the map canvas. */
   mapSector(cv: HTMLCanvasElement, x: number, y: number): number {
     return sectorAt((x / cv.clientWidth) * WORLD_W, (y / cv.clientHeight) * WORLD_H);
-  }
-  /** A locked sector next to the open area. */
-  frontier(id: number): boolean {
-    return !this.f.open[id] && neighbours(id).some((n) => this.f.open[n]);
   }
 }
 
